@@ -28,12 +28,35 @@ class SystemCoordinator:
         # Initialize configuration
         self.config = config or SystemConfig()
         
+        # Always read OPENAI_MODEL from environment and override if present
+        openai_model = os.getenv("OPENAI_MODEL")
+        if openai_model:
+            self.config.openai_model = openai_model
+            print(f"[DEBUG] Overriding model from environment: {openai_model}")
+        
         # Initialize OpenAI client
         openai_api_key = os.getenv("OPENAI_API_KEY")
         if not openai_api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
         
-        self.openai_client = OpenAI(api_key=openai_api_key)
+        # Get custom API base URL if provided
+        openai_api_base = os.getenv("OPENAI_API_BASE")
+        
+        # Log initialization details
+        print(f"[DEBUG] OpenAI API Key: {'***' + openai_api_key[-10:] if openai_api_key else 'None'}")
+        print(f"[DEBUG] OpenAI API Base: {openai_api_base or 'Default (https://api.openai.com/v1)'}")
+        print(f"[DEBUG] OpenAI Model: {self.config.openai_model}")
+        
+        # Initialize OpenAI client with custom base URL if provided
+        try:
+            if openai_api_base:
+                self.openai_client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
+            else:
+                self.openai_client = OpenAI(api_key=openai_api_key)
+            print(f"[DEBUG] OpenAI client initialized successfully")
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize OpenAI client: {str(e)}")
+            raise
         
         # Initialize database
         self.database = DatabaseManager(self.config.database_path)
@@ -136,8 +159,16 @@ class SystemCoordinator:
     async def _planning_phase(self, user_query: str, session_id: str) -> Optional[TaskGraph]:
         """Execute the planning phase"""
         try:
+            print(f"[DEBUG] Coordinator - Starting planning phase for query: {user_query}")
+            print(f"[DEBUG] Coordinator - Session ID: {session_id}")
+            
             # Generate task graph using planner model
+            print(f"[DEBUG] Coordinator - Calling planner.analyze_and_decompose...")
             task_graph = self.planner.analyze_and_decompose(user_query, session_id)
+            
+            print(f"[DEBUG] Coordinator - Task graph generated successfully")
+            print(f"[DEBUG] Coordinator - Number of tasks: {len(task_graph.nodes)}")
+            print(f"[DEBUG] Coordinator - Number of dependencies: {len(task_graph.edges)}")
             
             # Save initial task graph
             self.database.save_task_graph(session_id, task_graph, is_final=False)
@@ -148,6 +179,10 @@ class SystemCoordinator:
             return task_graph
             
         except Exception as e:
+            print(f"[ERROR] Coordinator - Planning phase failed: {str(e)}")
+            print(f"[ERROR] Coordinator - Exception type: {type(e).__name__}")
+            import traceback
+            print(f"[ERROR] Coordinator - Traceback: {traceback.format_exc()}")
             self.database.log_event(session_id, "coordinator", "planning_error", f"Planning failed: {str(e)}")
             return None
     
@@ -350,6 +385,11 @@ class CLIInterface:
                 # Treat as user query
                 self.console.print(f"\n[bold]正在处理: {user_input}[/bold]")
                 result = await self.coordinator.process_user_query(user_input)
+                
+                # Display the result to the user
+                if result:
+                    self.console.print(f"\n[bold green]处理结果:[/bold green]")
+                    self.console.print(result)
                 
             except KeyboardInterrupt:
                 self.console.print("\n[yellow]操作已中断[/yellow]")

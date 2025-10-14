@@ -60,6 +60,9 @@ class PlannerModel:
     
     def _analyze_query(self, user_query: str, session_id: str) -> Dict[str, Any]:
         """Analyze user query to extract requirements and constraints"""
+        print(f"[DEBUG] Planner - Analyzing query: {user_query}")
+        print(f"[DEBUG] Planner - Using model: {self.model_name}")
+        
         prompt = f"""
         请分析以下用户需求，提取关键信息并结构化输出：
 
@@ -86,17 +89,26 @@ class PlannerModel:
         }}
         """
         
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": "你是一个专业的需求分析师，擅长将用户需求结构化。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3
-        )
-        
-        analysis_text = response.choices[0].message.content
-        self.database.log_event(session_id, "planner", "query_analyzed", f"Analysis: {analysis_text[:200]}...")
+        try:
+            print(f"[DEBUG] Planner - Making API call to analyze query...")
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的需求分析师，擅长将用户需求结构化。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3
+            )
+            print(f"[DEBUG] Planner - API call successful, response status: {response.choices[0].finish_reason if response.choices else 'No choices'}")
+            
+            analysis_text = response.choices[0].message.content
+            print(f"[DEBUG] Planner - Analysis response length: {len(analysis_text)} characters")
+            print(f"[DEBUG] Planner - Analysis preview: {analysis_text[:100]}...")
+            self.database.log_event(session_id, "planner", "query_analyzed", f"Analysis: {analysis_text[:200]}...")
+            
+        except Exception as e:
+            print(f"[ERROR] Planner - API call failed: {str(e)}")
+            raise
         
         try:
             # Extract JSON from response
@@ -130,6 +142,9 @@ class PlannerModel:
     
     def _generate_tasks(self, analysis_result: Dict[str, Any], session_id: str) -> List[TaskNode]:
         """Generate task nodes based on analysis"""
+        print(f"[DEBUG] Planner - Generating tasks from analysis")
+        print(f"[DEBUG] Planner - Analysis result: {analysis_result}")
+        
         prompt = f"""
         基于以下需求分析结果，将需求分解为具体的可执行任务：
 
@@ -155,17 +170,26 @@ class PlannerModel:
         4. 确保所有任务覆盖完整需求
         """
         
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": "你是一个专业的任务分解专家，擅长将复杂需求分解为可执行的任务。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3
-        )
-        
-        response_text = response.choices[0].message.content
-        self.database.log_event(session_id, "planner", "tasks_generated", f"Generated tasks: {response_text[:200]}...")
+        try:
+            print(f"[DEBUG] Planner - Making API call to generate tasks...")
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的任务分解专家，擅长将复杂需求分解为可执行的任务。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3
+            )
+            print(f"[DEBUG] Planner - Task generation API call successful")
+            
+            response_text = response.choices[0].message.content
+            print(f"[DEBUG] Planner - Task generation response length: {len(response_text)} characters")
+            print(f"[DEBUG] Planner - Task generation preview: {response_text[:100]}...")
+            self.database.log_event(session_id, "planner", "tasks_generated", f"Generated tasks: {response_text[:200]}...")
+            
+        except Exception as e:
+            print(f"[ERROR] Planner - Task generation API call failed: {str(e)}")
+            raise
         
         try:
             # Extract JSON from response
