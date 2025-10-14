@@ -285,6 +285,7 @@ class CLIInterface:
     def __init__(self):
         self.coordinator = None
         from rich.console import Console
+        from rich.panel import Panel
         self.console = Console()
     
     def initialize(self, config: Optional[SystemConfig] = None):
@@ -303,6 +304,7 @@ class CLIInterface:
             self.console.print("[red]系统未初始化[/red]")
             return
         
+        from rich.panel import Panel
         self.console.print(Panel.fit(
             "[bold blue]多模型协作任务处理系统[/bold blue]\n"
             "[green]交互模式已启动[/green]\n"
@@ -356,6 +358,7 @@ class CLIInterface:
     
     def _show_help(self):
         """Show help information"""
+        from rich.panel import Panel
         help_text = """
 [bold]可用命令:[/bold]
 
@@ -376,7 +379,6 @@ class CLIInterface:
         """Show system status"""
         status = self.coordinator.get_system_status()
         
-        table = self.console.table
         # Create a simple status display
         self.console.print(f"[bold green]系统状态:[/bold green] {status['system_status']}")
         self.console.print(f"[bold]总会话数:[/bold] {status['total_sessions']}")

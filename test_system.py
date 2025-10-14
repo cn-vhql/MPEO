@@ -72,12 +72,19 @@ def test_models():
         from mpeo.models import TaskNode, TaskEdge, TaskGraph, TaskType, DependencyType
         
         # Test TaskNode
-        task = TaskNode(
+        task1 = TaskNode(
             task_id="T1",
             task_desc="测试任务",
             task_type=TaskType.LOCAL_COMPUTE,
             expected_output="测试结果",
             priority=3
+        )
+        task2 = TaskNode(
+            task_id="T2",
+            task_desc="测试任务2",
+            task_type=TaskType.LOCAL_COMPUTE,
+            expected_output="测试结果2",
+            priority=2
         )
         print("✓ TaskNode creation successful")
         
@@ -90,7 +97,7 @@ def test_models():
         print("✓ TaskEdge creation successful")
         
         # Test TaskGraph
-        graph = TaskGraph(nodes=[task], edges=[edge])
+        graph = TaskGraph(nodes=[task1, task2], edges=[edge])
         print("✓ TaskGraph creation successful")
         
         # Test cycle detection
@@ -111,7 +118,8 @@ def test_database():
         from mpeo.database import DatabaseManager
         
         # Use test database
-        db = DatabaseManager("test_mpeo.db")
+        test_db_path = "test_mpeo.db"
+        db = DatabaseManager(test_db_path)
         print("✓ Database initialization successful")
         
         # Test config operations
@@ -127,8 +135,12 @@ def test_database():
         print("✓ Logging operations successful")
         
         # Clean up test database
-        os.remove("test_mpeo.db")
-        print("✓ Database cleanup successful")
+        if os.path.exists(test_db_path):
+            try:
+                os.remove(test_db_path)
+                print("✓ Database cleanup successful")
+            except PermissionError:
+                print("⚠️ Database cleanup skipped (file in use)")
         
         return True
         
@@ -144,19 +156,49 @@ def test_task_graph_validation():
         from mpeo.models import TaskNode, TaskEdge, TaskGraph, TaskType, DependencyType
         
         # Test valid graph
-        task1 = TaskNode("T1", "Task 1", TaskType.LOCAL_COMPUTE, "Output 1", 1)
-        task2 = TaskNode("T2", "Task 2", TaskType.LOCAL_COMPUTE, "Output 2", 2)
-        task3 = TaskNode("T3", "Task 3", TaskType.LOCAL_COMPUTE, "Output 3", 3)
+        task1 = TaskNode(
+            task_id="T1",
+            task_desc="Task 1",
+            task_type=TaskType.LOCAL_COMPUTE,
+            expected_output="Output 1",
+            priority=1
+        )
+        task2 = TaskNode(
+            task_id="T2",
+            task_desc="Task 2",
+            task_type=TaskType.LOCAL_COMPUTE,
+            expected_output="Output 2",
+            priority=2
+        )
+        task3 = TaskNode(
+            task_id="T3",
+            task_desc="Task 3",
+            task_type=TaskType.LOCAL_COMPUTE,
+            expected_output="Output 3",
+            priority=3
+        )
         
-        edge1 = TaskEdge("T1", "T2", DependencyType.RESULT_DEPENDENCY)
-        edge2 = TaskEdge("T2", "T3", DependencyType.RESULT_DEPENDENCY)
+        edge1 = TaskEdge(
+            from_task_id="T1",
+            to_task_id="T2",
+            dependency_type=DependencyType.RESULT_DEPENDENCY
+        )
+        edge2 = TaskEdge(
+            from_task_id="T2",
+            to_task_id="T3",
+            dependency_type=DependencyType.RESULT_DEPENDENCY
+        )
         
         valid_graph = TaskGraph(nodes=[task1, task2, task3], edges=[edge1, edge2])
         assert not valid_graph.has_cycle()
         print("✓ Valid graph detection successful")
         
         # Test graph with cycle
-        edge3 = TaskEdge("T3", "T1", DependencyType.RESULT_DEPENDENCY)
+        edge3 = TaskEdge(
+            from_task_id="T3",
+            to_task_id="T1",
+            dependency_type=DependencyType.RESULT_DEPENDENCY
+        )
         cyclic_graph = TaskGraph(nodes=[task1, task2, task3], edges=[edge1, edge2, edge3])
         assert cyclic_graph.has_cycle()
         print("✓ Cycle detection successful")
