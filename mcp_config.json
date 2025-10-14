@@ -1,0 +1,22 @@
+{
+  "mcpServices": {
+    "default": {
+      "type": "sse",
+      "url": "https://mcp.api-inference.modelscope.net/f72f96405fff4b/sse",
+      "timeout": 30,
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream"
+      }
+    },
+    "fetch": {
+      "type": "sse",
+      "url": "https://mcp.api-inference.modelscope.net/f72f96405fff4b/sse",
+      "timeout": 30,
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream"
+      }
+    }
+  }
+}

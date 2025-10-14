@@ -5,6 +5,7 @@ System Coordinator - Orchestrates all components of the multi-model system
 import asyncio
 import uuid
 import os
+import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
 from openai import OpenAI
@@ -21,9 +22,49 @@ from .interface import HumanFeedbackInterface
 class SystemCoordinator:
     """Main system coordinator that orchestrates all components"""
     
+    def _setup_logging(self):
+        """Setup logging system with file and console output"""
+        # Create logs directory if it doesn't exist
+        logs_dir = "logs"
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+        
+        # Generate log filename with current date
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        log_filename = os.path.join(logs_dir, f"{current_date}.log")
+        
+        # Configure logging format
+        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        formatter = logging.Formatter(log_format)
+        
+        # Setup root logger
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        
+        # Clear existing handlers
+        logger.handlers.clear()
+        
+        # File handler (for all levels)
+        file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        # Console handler (for INFO and above)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        # Log that logging system is initialized
+        logging.info(f"Logging system initialized. Log file: {log_filename}")
+    
     def __init__(self, config: Optional[SystemConfig] = None):
         # Load environment variables
         load_dotenv()
+        
+        # Setup logging system
+        self._setup_logging()
         
         # Initialize configuration
         self.config = config or SystemConfig()
@@ -32,7 +73,7 @@ class SystemCoordinator:
         openai_model = os.getenv("OPENAI_MODEL")
         if openai_model:
             self.config.openai_model = openai_model
-            print(f"[DEBUG] Overriding model from environment: {openai_model}")
+            logging.debug(f"Overriding model from environment: {openai_model}")
         
         # Initialize OpenAI client
         openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -43,9 +84,9 @@ class SystemCoordinator:
         openai_api_base = os.getenv("OPENAI_API_BASE")
         
         # Log initialization details
-        print(f"[DEBUG] OpenAI API Key: {'***' + openai_api_key[-10:] if openai_api_key else 'None'}")
-        print(f"[DEBUG] OpenAI API Base: {openai_api_base or 'Default (https://api.openai.com/v1)'}")
-        print(f"[DEBUG] OpenAI Model: {self.config.openai_model}")
+        logging.debug(f"OpenAI API Key: {'***' + openai_api_key[-10:] if openai_api_key else 'None'}")
+        logging.debug(f"OpenAI API Base: {openai_api_base or 'Default (https://api.openai.com/v1)'}")
+        logging.debug(f"OpenAI Model: {self.config.openai_model}")
         
         # Initialize OpenAI client with custom base URL if provided
         try:
@@ -53,9 +94,9 @@ class SystemCoordinator:
                 self.openai_client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
             else:
                 self.openai_client = OpenAI(api_key=openai_api_key)
-            print(f"[DEBUG] OpenAI client initialized successfully")
+            logging.debug("OpenAI client initialized successfully")
         except Exception as e:
-            print(f"[ERROR] Failed to initialize OpenAI client: {str(e)}")
+            logging.error(f"Failed to initialize OpenAI client: {str(e)}")
             raise
         
         # Initialize database
@@ -69,14 +110,72 @@ class SystemCoordinator:
         
         # Load configuration from database
         self._load_configuration()
+        
+        # Update planner with available MCP services
+        self._update_planner_mcp_services()
     
     def _load_configuration(self):
-        """Load system configuration from database"""
-        # Load MCP services
+        """Load system configuration from database and config files"""
+        # Load MCP services from database
         mcp_services = self.database.load_config("mcp_services", {})
         for service_name, service_config in mcp_services.items():
             mcp_config = MCPServiceConfig.parse_obj(service_config)
             self.executor.register_mcp_service(mcp_config)
+        
+        # Load MCP services from configuration file
+        self._load_mcp_services_from_config()
+    
+    def _load_mcp_services_from_config(self):
+        """Load MCP services from configuration file"""
+        try:
+            import json
+            import os
+            
+            # Look for mcp_config.json in the project root
+            config_file_path = "mcp_config.json"
+            if os.path.exists(config_file_path):
+                with open(config_file_path, 'r', encoding='utf-8') as f:
+                    config_data = json.load(f)
+                
+                # Load MCP services from config
+                if "mcpServices" in config_data:
+                    for service_name, service_config in config_data["mcpServices"].items():
+                        try:
+                            # Convert config to MCPServiceConfig
+                            mcp_config = MCPServiceConfig(
+                                service_name=service_name,
+                                endpoint_url=service_config.get("url", ""),
+                                timeout=service_config.get("timeout", 30),
+                                headers=service_config.get("headers", {})
+                            )
+                            
+                            # Register the service
+                            self.executor.register_mcp_service(mcp_config)
+                            logging.info(f"MCP service '{service_name}' loaded from config file")
+                            
+                        except Exception as e:
+                            logging.error(f"Failed to load MCP service '{service_name}' from config: {str(e)}")
+                
+                logging.info(f"MCP services loaded from config file: {config_file_path}")
+            else:
+                logging.info("No mcp_config.json file found, skipping MCP service loading from config")
+                
+        except Exception as e:
+            logging.error(f"Failed to load MCP services from config file: {str(e)}")
+    
+    def _update_planner_mcp_services(self):
+        """Update planner with available MCP services"""
+        try:
+            # Get list of available MCP service names
+            mcp_service_names = list(self.executor.mcp_services.keys())
+            
+            # Update planner with available services
+            self.planner.update_mcp_services(mcp_service_names)
+            
+            logging.info(f"Updated planner with MCP services: {mcp_service_names}")
+            
+        except Exception as e:
+            logging.error(f"Failed to update planner with MCP services: {str(e)}")
     
     async def process_user_query(self, user_query: str) -> str:
         """
@@ -159,16 +258,16 @@ class SystemCoordinator:
     async def _planning_phase(self, user_query: str, session_id: str) -> Optional[TaskGraph]:
         """Execute the planning phase"""
         try:
-            print(f"[DEBUG] Coordinator - Starting planning phase for query: {user_query}")
-            print(f"[DEBUG] Coordinator - Session ID: {session_id}")
+            logging.debug(f"Coordinator - Starting planning phase for query: {user_query}")
+            logging.debug(f"Coordinator - Session ID: {session_id}")
             
             # Generate task graph using planner model
-            print(f"[DEBUG] Coordinator - Calling planner.analyze_and_decompose...")
+            logging.debug(f"Coordinator - Calling planner.analyze_and_decompose...")
             task_graph = self.planner.analyze_and_decompose(user_query, session_id)
             
-            print(f"[DEBUG] Coordinator - Task graph generated successfully")
-            print(f"[DEBUG] Coordinator - Number of tasks: {len(task_graph.nodes)}")
-            print(f"[DEBUG] Coordinator - Number of dependencies: {len(task_graph.edges)}")
+            logging.debug(f"Coordinator - Task graph generated successfully")
+            logging.debug(f"Coordinator - Number of tasks: {len(task_graph.nodes)}")
+            logging.debug(f"Coordinator - Number of dependencies: {len(task_graph.edges)}")
             
             # Save initial task graph
             self.database.save_task_graph(session_id, task_graph, is_final=False)
@@ -179,10 +278,10 @@ class SystemCoordinator:
             return task_graph
             
         except Exception as e:
-            print(f"[ERROR] Coordinator - Planning phase failed: {str(e)}")
-            print(f"[ERROR] Coordinator - Exception type: {type(e).__name__}")
+            logging.error(f"Coordinator - Planning phase failed: {str(e)}")
+            logging.error(f"Coordinator - Exception type: {type(e).__name__}")
             import traceback
-            print(f"[ERROR] Coordinator - Traceback: {traceback.format_exc()}")
+            logging.error(f"Coordinator - Traceback: {traceback.format_exc()}")
             self.database.log_event(session_id, "coordinator", "planning_error", f"Planning failed: {str(e)}")
             return None
     

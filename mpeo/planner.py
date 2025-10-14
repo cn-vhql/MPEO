@@ -17,6 +17,12 @@ class PlannerModel:
         self.client = openai_client
         self.database = database
         self.model_name = model_name
+        self.available_mcp_services = []
+    
+    def update_mcp_services(self, mcp_services: List[str]):
+        """Update available MCP services for planning"""
+        self.available_mcp_services = mcp_services
+        print(f"[DEBUG] Planner - Updated MCP services: {mcp_services}")
     
     def analyze_and_decompose(self, user_query: str, session_id: str) -> TaskGraph:
         """
@@ -144,18 +150,22 @@ class PlannerModel:
         """Generate task nodes based on analysis"""
         print(f"[DEBUG] Planner - Generating tasks from analysis")
         print(f"[DEBUG] Planner - Analysis result: {analysis_result}")
+        print(f"[DEBUG] Planner - Available MCP services: {self.available_mcp_services}")
         
         prompt = f"""
-        基于以下需求分析结果，将需求分解为具体的可执行任务：
+        基于以下需求分析结果和可用的MCP服务，将需求分解为具体的可执行任务：
 
         需求分析：
         {json.dumps(analysis_result, ensure_ascii=False, indent=2)}
+
+        可用的MCP服务：
+        {json.dumps(self.available_mcp_services, ensure_ascii=False, indent=2)}
 
         请按照以下JSON格式输出任务列表：
         {{
             "tasks": [
                 {{
-                    "task_desc": "任务具体描述",
+                    "task_desc": "任务具体描述，如果使用MCP服务请在描述中包含服务名称",
                     "task_type": "任务类型（本地计算/mcp调用/数据处理）",
                     "expected_output": "预期输出描述",
                     "priority": 优先级(1-5)
@@ -163,11 +173,17 @@ class PlannerModel:
             ]
         }}
 
-        注意：
+        重要指导原则：
         1. 任务粒度要适中，每个任务应该是可独立完成的
         2. 任务描述要具体明确
         3. 合理分配优先级（1-5，数字越大优先级越高）
         4. 确保所有任务覆盖完整需求
+        5. 根据可用的MCP服务合理规划任务：
+           - 如果需要网络数据获取，使用mcp调用类型的任务
+           - 如果需要复杂计算，使用本地计算类型的任务
+           - 如果需要数据处理，使用数据处理类型的任务
+        6. 在任务描述中明确指出使用的MCP服务名称，例如："使用default服务获取棉花最新新闻"
+        7. 避免创建无法执行的任务，确保任务描述与可用服务匹配
         """
         
         try:
@@ -175,7 +191,7 @@ class PlannerModel:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": "你是一个专业的任务分解专家，擅长将复杂需求分解为可执行的任务。"},
+                    {"role": "system", "content": "你是一个专业的任务分解专家，擅长将复杂需求分解为可执行的任务，并且能够根据可用的MCP服务合理规划任务。"},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3

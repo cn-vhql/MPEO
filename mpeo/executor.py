@@ -335,15 +335,26 @@ class TaskExecutor:
     
     def _extract_service_name(self, task_desc: str) -> str:
         """Extract MCP service name from task description"""
-        # Simple extraction logic - can be enhanced
+        # Try to extract service name from task description
         if "mcp_" in task_desc.lower():
             # Try to extract service name after "mcp_"
             parts = task_desc.lower().split("mcp_")
             if len(parts) > 1:
                 service_name = parts[1].split()[0]
+                # Check if this service is registered
+                if service_name in self.mcp_services:
+                    return service_name
+        
+        # Try to find service name in description
+        for service_name in self.mcp_services:
+            if service_name.lower() in task_desc.lower():
                 return service_name
         
-        # Default service name
+        # Use first available service as default
+        if self.mcp_services:
+            return list(self.mcp_services.keys())[0]
+        
+        # No services available
         return "default"
     
     async def _execute_data_processing(self, task: TaskNode, input_data: Dict[str, Any], 
