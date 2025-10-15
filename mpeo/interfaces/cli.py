@@ -463,7 +463,17 @@ class HumanFeedbackInterface:
             status_text = "✓ 成功" if result.status.value == "成功" else "✗ 失败"
             status_style = "green" if result.status.value == "成功" else "red"
             
-            output_text = result.output or result.error_msg or "无输出"
+            # 确保输出是字符串格式
+            output_raw = result.output or result.error_msg or "无输出"
+            if isinstance(output_raw, dict):
+                # 如果是字典，转换为字符串
+                output_text = str(output_raw)
+            elif isinstance(output_raw, list):
+                # 如果是列表，转换为字符串
+                output_text = str(output_raw)
+            else:
+                output_text = str(output_raw)
+
             if len(output_text) > 37:
                 output_text = output_text[:37] + "..."
             

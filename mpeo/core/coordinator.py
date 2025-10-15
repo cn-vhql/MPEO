@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from ..models import TaskSession, TaskGraph, ExecutionResults, SystemConfig, MCPServiceConfig
 from ..models.agent_config import MultiAgentConfig, OpenAIApiConfig
 from ..services import DatabaseManager
+from ..services.mcp_manager import MCPServiceManager
 from ..utils.config import load_agent_config
 from .planner import PlannerModel
 from .executor import TaskExecutor
@@ -63,6 +64,9 @@ class SystemCoordinator:
         # Initialize database
         self.database = DatabaseManager(self.config.database_path)
 
+        # Initialize MCP service manager
+        self.mcp_manager = MCPServiceManager()
+
         # Initialize components with individual model configurations and clients
         self.planner = PlannerModel(
             self.openai_clients['planner'],
@@ -85,8 +89,50 @@ class SystemCoordinator:
         # Load configuration from database
         self._load_configuration()
 
-        # Update planner with available MCP services
-        self._update_planner_mcp_services()
+        # Note: MCP manager will be initialized when needed (lazy initialization)
+        self._mcp_manager_initialized = False
+
+    async def cleanup(self):
+        """Cleanup resources"""
+        if hasattr(self, 'mcp_manager') and self.mcp_manager:
+            await self.mcp_manager.close()
+            self._mcp_manager_initialized = False
+
+    async def _ensure_mcp_manager_initialized(self):
+        """Ensure MCP manager is initialized (lazy initialization)"""
+        if not self._mcp_manager_initialized:
+            await self._initialize_mcp_manager()
+            self._mcp_manager_initialized = True
+
+    async def _initialize_mcp_manager(self):
+        """Initialize MCP manager and update components"""
+        await self.mcp_manager.initialize()
+
+        # Share MCP manager with planner and executor
+        await self.planner.set_mcp_manager(self.mcp_manager)
+        self.executor.mcp_manager = self.mcp_manager
+
+        # Load MCP services from database
+        await self._load_mcp_services_from_database()
+
+        # Load MCP services from configuration file
+        await self._load_mcp_services_from_config()
+
+        logging.info("MCP manager initialized and shared with components")
+
+    async def _load_mcp_services_from_database(self):
+        """Load MCP services from database and register with manager"""
+        try:
+            mcp_services = self.database.load_config("mcp_services", {})
+            for service_name, service_config in mcp_services.items():
+                try:
+                    mcp_config = MCPServiceConfig.parse_obj(service_config)
+                    await self.mcp_manager.register_from_service_config(mcp_config)
+                    logging.info(f"MCP service '{service_name}' loaded from database")
+                except Exception as e:
+                    logging.error(f"Failed to load MCP service '{service_name}' from database: {str(e)}")
+        except Exception as e:
+            logging.error(f"Failed to load MCP services from database: {str(e)}")
 
     def _initialize_openai_clients(self) -> Dict[str, OpenAI]:
         """为每个智能体初始化独立的OpenAI客户端"""
@@ -146,27 +192,21 @@ class SystemCoordinator:
     
     def _load_configuration(self):
         """Load system configuration from database and config files"""
-        # Load MCP services from database
-        mcp_services = self.database.load_config("mcp_services", {})
-        for service_name, service_config in mcp_services.items():
-            mcp_config = MCPServiceConfig.parse_obj(service_config)
-            self.executor.register_mcp_service(mcp_config)
-        
-        # Load MCP services from configuration file
-        self._load_mcp_services_from_config()
+        # MCP services are now loaded in _initialize_mcp_manager
+        pass
     
-    def _load_mcp_services_from_config(self):
+    async def _load_mcp_services_from_config(self):
         """Load MCP services from configuration file"""
         try:
             import json
             import os
-            
+
             # Look for mcp_services.json in the config directory
             config_file_path = "config/mcp_services.json"
             if os.path.exists(config_file_path):
                 with open(config_file_path, 'r', encoding='utf-8') as f:
                     config_data = json.load(f)
-                
+
                 # Load MCP services from config
                 if "mcpServices" in config_data:
                     for service_name, service_config in config_data["mcpServices"].items():
@@ -179,18 +219,18 @@ class SystemCoordinator:
                                 timeout=service_config.get("timeout", 30),
                                 headers=service_config.get("headers", {})
                             )
-                            
-                            # Register the service
-                            self.executor.register_mcp_service(mcp_config)
+
+                            # Register the service with MCP manager
+                            await self.mcp_manager.register_from_service_config(mcp_config)
                             logging.info(f"MCP service '{service_name}' loaded from config file")
-                            
+
                         except Exception as e:
                             logging.error(f"Failed to load MCP service '{service_name}' from config: {str(e)}")
-                
+
                 logging.info(f"MCP services loaded from config file: {config_file_path}")
             else:
                 logging.info("No config/mcp_services.json file found, skipping MCP service loading from config")
-                
+
         except Exception as e:
             logging.error(f"Failed to load MCP services from config file: {str(e)}")
     
@@ -227,8 +267,11 @@ class SystemCoordinator:
         )
         
         self.database.log_event(session_id, "coordinator", "session_started", f"Query: {user_query[:100]}...")
-        
+
         try:
+            # Ensure MCP manager is initialized
+            await self._ensure_mcp_manager_initialized()
+
             # Step 1: Planning Phase
             self.database.log_event(session_id, "coordinator", "planning_phase_started")
             task_graph = await self._planning_phase(user_query, session_id)
@@ -294,7 +337,7 @@ class SystemCoordinator:
             
             # Generate task graph using planner model
             logging.debug(f"Coordinator - Calling planner.analyze_and_decompose...")
-            task_graph = self.planner.analyze_and_decompose(user_query, session_id)
+            task_graph = await self.planner.analyze_and_decompose(user_query, session_id)
             
             logging.debug(f"Coordinator - Task graph generated successfully")
             logging.debug(f"Coordinator - Number of tasks: {len(task_graph.nodes)}")
@@ -382,10 +425,17 @@ class SystemCoordinator:
         ))
         console.print("\n")
     
-    def register_mcp_service(self, service_config: MCPServiceConfig):
+    async def register_mcp_service(self, service_config: MCPServiceConfig):
         """Register an MCP service with the system"""
-        self.executor.register_mcp_service(service_config)
-        
+        # Ensure MCP manager is initialized
+        await self._ensure_mcp_manager_initialized()
+
+        # Register with MCP manager
+        await self.mcp_manager.register_from_service_config(service_config)
+
+        # Refresh planner's MCP tools
+        await self.planner.refresh_mcp_tools()
+
         # Save to database
         mcp_services = self.database.load_config("mcp_services", {})
         mcp_services[service_config.service_name] = service_config.dict()
@@ -468,63 +518,83 @@ class CLIInterface:
         if not self.coordinator:
             self.console.print("[red]系统未初始化[/red]")
             return
-        
-        from rich.panel import Panel
-        self.console.print(Panel.fit(
-            "[bold blue]多模型协作任务处理系统[/bold blue]\n"
-            "[green]交互模式已启动[/green]\n"
-            "输入 'help' 查看可用命令，输入 'quit' 退出",
-            title="系统状态"
-        ))
-        
-        while True:
-            try:
-                user_input = self.console.input("\n[bold cyan]请输入您的问题或命令:[/bold cyan] ").strip()
-                
-                if not user_input:
-                    continue
-                
-                if user_input.lower() in ['quit', 'exit', '退出']:
-                    self.console.print("[yellow]再见！[/yellow]")
-                    break
-                
-                if user_input.lower() in ['help', '帮助']:
-                    self._show_help()
-                    continue
-                
-                if user_input.lower() in ['status', '状态']:
-                    self._show_status()
-                    continue
-                
-                if user_input.lower() in ['history', '历史']:
-                    self._show_history()
-                    continue
-                
-                if user_input.lower() in ['logs', '日志']:
-                    self._show_logs()
-                    continue
-                
-                if user_input.startswith('config '):
-                    self._handle_config_command(user_input)
-                    continue
-                
-                if user_input.startswith('mcp '):
-                    self._handle_mcp_command(user_input)
-                    continue
-                
-                # Treat as user query
-                self.console.print(f"\n[bold]正在处理: {user_input}[/bold]")
-                result = await self.coordinator.process_user_query(user_input)
-                
-                # Display the result to the user
-                if result:
-                    self.console.print(f"\n[bold green]处理结果:[/bold green]")
-                    self.console.print(result)
-                
-            except KeyboardInterrupt:
-                self.console.print("\n[yellow]操作已中断[/yellow]")
-            except Exception as e:
-                self.console.print(f"\n[red]处理错误: {str(e)}[/red]")
+
+        try:
+            from rich.panel import Panel
+            self.console.print(Panel.fit(
+                "[bold blue]多模型协作任务处理系统[/bold blue]\n"
+                "[green]交互模式已启动[/green]\n"
+                "输入 'help' 查看可用命令，输入 'quit' 退出",
+                title="系统状态"
+            ))
+
+            while True:
+                try:
+                    user_input = self.console.input("\n[bold cyan]请输入您的问题或命令:[/bold cyan] ").strip()
+
+                    if not user_input:
+                        continue
+
+                    if user_input.lower() in ['quit', 'exit', '退出']:
+                        self.console.print("[yellow]再见！[/yellow]")
+                        # 清理资源
+                        await self.coordinator.cleanup()
+                        break
+
+                    if user_input.lower() in ['help', '帮助']:
+                        self._show_help()
+                        continue
+
+                    if user_input.lower() in ['status', '状态']:
+                        self._show_status()
+                        continue
+
+                    if user_input.lower() in ['history', '历史']:
+                        self._show_history()
+                        continue
+
+                    if user_input.lower() in ['logs', '日志']:
+                        self._show_logs()
+                        continue
+
+                    if user_input.startswith('config '):
+                        self._handle_config_command(user_input)
+                        continue
+
+                    if user_input.startswith('mcp '):
+                        await self._handle_mcp_command(user_input)
+                        continue
+
+                    # Treat as user query
+                    self.console.print(f"\n[bold]正在处理: {user_input}[/bold]")
+                    result = await self.coordinator.process_user_query(user_input)
+
+                    # Display the result to the user
+                    if result:
+                        self.console.print(f"\n[bold green]处理结果:[/bold green]")
+                        self.console.print(result)
+
+                except KeyboardInterrupt:
+                    self.console.print("\n[yellow]操作已中断[/yellow]")
+                    # 确保清理资源
+                    try:
+                        await self.coordinator.cleanup()
+                    except:
+                        pass
+                except Exception as e:
+                    self.console.print(f"\n[red]处理错误: {str(e)}[/red]")
+                    # 确保清理资源
+                    try:
+                        await self.coordinator.cleanup()
+                    except:
+                        pass
+        finally:
+            # 最终清理
+            if self.coordinator:
+                try:
+                    await self.coordinator.cleanup()
+                except:
+                    pass
     
     def _show_help(self):
         """Show help information"""
@@ -600,21 +670,21 @@ class CLIInterface:
         else:
             self.console.print("[red]用法错误[/red]")
     
-    def _handle_mcp_command(self, command: str):
+    async def _handle_mcp_command(self, command: str):
         """Handle MCP service commands"""
         parts = command.split()
         if len(parts) < 4 or parts[1] != "register":
             self.console.print("[red]用法: mcp register <service_name> <url>[/red]")
             return
-        
+
         service_name = parts[2]
         service_url = parts[3]
-        
+
         mcp_config = MCPServiceConfig(
             service_name=service_name,
             endpoint_url=service_url,
             timeout=30
         )
-        
-        self.coordinator.register_mcp_service(mcp_config)
+
+        await self.coordinator.register_mcp_service(mcp_config)
         self.console.print(f"[green]✓ MCP服务 '{service_name}' 已注册[/green]")

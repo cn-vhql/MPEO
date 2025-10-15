@@ -9,6 +9,7 @@ from openai import OpenAI
 from ..models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType
 from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
+from ..services.mcp_manager import MCPServiceManager, MCPTool
 
 
 class PlannerModel:
@@ -24,54 +25,140 @@ class PlannerModel:
             max_tokens=2000,
             timeout=60
         )
-        self.available_mcp_services = []
+        self.mcp_manager: Optional[MCPServiceManager] = None
+        self.available_mcp_tools: Dict[str, List[MCPTool]] = {}
 
     @property
     def model_name(self) -> str:
         """获取模型名称"""
         return self.model_config.model_name
-    
+
+    async def set_mcp_manager(self, mcp_manager: MCPServiceManager):
+        """设置MCP服务管理器并获取可用工具信息"""
+        self.mcp_manager = mcp_manager
+        await self.refresh_mcp_tools()
+
+    async def refresh_mcp_tools(self):
+        """刷新可用的MCP工具列表"""
+        if not self.mcp_manager:
+            return
+
+        try:
+            self.available_mcp_tools = await self.mcp_manager.get_available_tools()
+            print(f"[DEBUG] Planner - Updated MCP tools from {len(self.available_mcp_tools)} services")
+            for service_name, tools in self.available_mcp_tools.items():
+                print(f"[DEBUG] Planner - Service {service_name}: {len(tools)} tools")
+                for tool in tools:
+                    print(f"[DEBUG] Planner -   - {tool.name}: {tool.description}")
+        except Exception as e:
+            print(f"[ERROR] Planner - Failed to refresh MCP tools: {str(e)}")
+            self.available_mcp_tools = {}
+
+    def get_tools_summary(self) -> str:
+        """获取MCP工具的摘要信息，用于prompt"""
+        if not self.available_mcp_tools:
+            return "暂无可用MCP工具"
+
+        summary = []
+        for service_name, tools in self.available_mcp_tools.items():
+            if tools:
+                summary.append(f"服务 '{service_name}' 提供以下工具:")
+                for tool in tools:
+                    tool_info = f"  - {tool.name}: {tool.description}"
+                    if tool.input_schema.get("properties"):
+                        params = []
+                        for param_name, param_info in tool.input_schema["properties"].items():
+                            required = param_name in tool.input_schema.get("required", [])
+                            req_str = " (必需)" if required else " (可选)"
+                            params.append(f"{param_name}{req_str}")
+                        if params:
+                            tool_info += f"\n    参数: {', '.join(params)}"
+                    summary.append(tool_info)
+
+        return "\n".join(summary) if summary else "暂无可用MCP工具"
+
+    def find_relevant_tools(self, query: str) -> List[Dict[str, Any]]:
+        """根据查询查找相关的MCP工具"""
+        relevant_tools = []
+        query_lower = query.lower()
+
+        for service_name, tools in self.available_mcp_tools.items():
+            for tool in tools:
+                # 简单的关键词匹配
+                relevance_score = 0
+
+                # 检查工具名称匹配
+                if tool.name.lower() in query_lower:
+                    relevance_score += 10
+
+                # 检查工具描述匹配
+                desc_lower = tool.description.lower()
+                query_words = query_lower.split()
+                for word in query_words:
+                    if word in desc_lower:
+                        relevance_score += 3
+
+                # 检查特定关键词匹配
+                if any(keyword in query_lower for keyword in ["fetch", "get", "获取", "下载"]) and "fetch" in tool.name.lower():
+                    relevance_score += 8
+                elif any(keyword in query_lower for keyword in ["search", "查找", "搜索"]) and "search" in tool.name.lower():
+                    relevance_score += 8
+                elif any(keyword in query_lower for keyword in ["process", "处理"]) and "process" in tool.name.lower():
+                    relevance_score += 8
+
+                if relevance_score > 0:
+                    relevant_tools.append({
+                        "service_name": service_name,
+                        "tool": tool,
+                        "relevance_score": relevance_score
+                    })
+
+        # 按相关性排序
+        relevant_tools.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return relevant_tools
+
+    # 保持向后兼容的方法
     def update_mcp_services(self, mcp_services: List[str]):
-        """Update available MCP services for planning"""
-        self.available_mcp_services = mcp_services
-        print(f"[DEBUG] Planner - Updated MCP services: {mcp_services}")
+        """Update available MCP services for planning (deprecated, use set_mcp_manager instead)"""
+        print(f"[DEBUG] Planner - update_mcp_services called with: {mcp_services}")
+        print(f"[DEBUG] Planner - This method is deprecated, please use set_mcp_manager instead")
     
-    def analyze_and_decompose(self, user_query: str, session_id: str) -> TaskGraph:
+    async def analyze_and_decompose(self, user_query: str, session_id: str) -> TaskGraph:
         """
         Analyze user query and decompose into task graph
-        
+
         Args:
             user_query: User's original query/question
             session_id: Session identifier for logging
-            
+
         Returns:
             TaskGraph: Generated task graph
         """
         self.database.log_event(session_id, "planner", "start_analysis", f"Query: {user_query[:100]}...")
-        
+
         try:
             # Step 1: Analyze the query and extract requirements
             analysis_result = self._analyze_query(user_query, session_id)
-            
-            # Step 2: Generate task decomposition
-            tasks = self._generate_tasks(analysis_result, session_id)
-            
+
+            # Step 2: Generate task decomposition (now async)
+            tasks = await self._generate_tasks(analysis_result, session_id)
+
             # Step 3: Generate dependencies between tasks
             dependencies = self._generate_dependencies(tasks, analysis_result, session_id)
-            
+
             # Step 4: Create task graph
             task_graph = TaskGraph(nodes=tasks, edges=dependencies)
-            
+
             # Validate the graph
             if task_graph.has_cycle():
                 self.database.log_event(session_id, "planner", "cycle_detected", "Generated DAG has cycles, regenerating...")
-                return self._regenerate_graph(user_query, session_id)
-            
-            self.database.log_event(session_id, "planner", "graph_generated", 
+                return await self._regenerate_graph(user_query, session_id)
+
+            self.database.log_event(session_id, "planner", "graph_generated",
                                   f"Generated {len(tasks)} tasks with {len(dependencies)} dependencies")
-            
+
             return task_graph
-            
+
         except Exception as e:
             self.database.log_event(session_id, "planner", "error", f"Failed to generate task graph: {str(e)}")
             raise
@@ -166,26 +253,48 @@ class PlannerModel:
                 "key_requirements": [user_query]
             }
     
-    def _generate_tasks(self, analysis_result: Dict[str, Any], session_id: str) -> List[TaskNode]:
+    async def _generate_tasks(self, analysis_result: Dict[str, Any], session_id: str) -> List[TaskNode]:
         """Generate task nodes based on analysis"""
         print(f"[DEBUG] Planner - Generating tasks from analysis")
         print(f"[DEBUG] Planner - Analysis result: {analysis_result}")
-        print(f"[DEBUG] Planner - Available MCP services: {self.available_mcp_services}")
-        
+
+        # 刷新MCP工具信息
+        await self.refresh_mcp_tools()
+
+        # 获取相关工具
+        user_query = analysis_result.get("core_objective", "")
+        relevant_tools = self.find_relevant_tools(user_query)
+
+        print(f"[DEBUG] Planner - Found {len(relevant_tools)} relevant MCP tools")
+        for tool_info in relevant_tools[:3]:  # 只显示前3个最相关的
+            tool = tool_info["tool"]
+            print(f"[DEBUG] Planner -   - {tool_info['service_name']}.{tool.name} (score: {tool_info['relevance_score']})")
+
+        # 构建工具信息字符串
+        tools_summary = self.get_tools_summary()
+
+        # 如果有相关工具，添加详细信息
+        if relevant_tools:
+            tools_summary += "\n\n特别相关的工具："
+            for tool_info in relevant_tools[:5]:  # 只显示前5个最相关的
+                tool = tool_info["tool"]
+                tools_summary += f"\n- {tool_info['service_name']}.{tool.name}: {tool.description}"
+                tools_summary += f"\n  格式化信息:\n{tool.format_for_llm()}"
+
         prompt = f"""
-        基于以下需求分析结果和可用的MCP服务，将需求分解为具体的可执行任务：
+        基于以下需求分析结果和可用的MCP工具，将需求分解为具体的可执行任务：
 
         需求分析：
         {json.dumps(analysis_result, ensure_ascii=False, indent=2)}
 
-        可用的MCP服务：
-        {json.dumps(self.available_mcp_services, ensure_ascii=False, indent=2)}
+        可用的MCP工具：
+        {tools_summary}
 
         请按照以下JSON格式输出任务列表：
         {{
             "tasks": [
                 {{
-                    "task_desc": "任务具体描述，如果使用MCP服务请在描述中包含服务名称",
+                    "task_desc": "任务具体描述，如果使用MCP工具请在描述中包含服务名和工具名",
                     "task_type": "任务类型（本地计算/mcp调用/数据处理）",
                     "expected_output": "预期输出描述",
                     "priority": 优先级(1-5)
@@ -198,12 +307,14 @@ class PlannerModel:
         2. 任务描述要具体明确
         3. 合理分配优先级（1-5，数字越大优先级越高）
         4. 确保所有任务覆盖完整需求
-        5. 根据可用的MCP服务合理规划任务：
+        5. 根据可用的MCP工具合理规划任务：
            - 如果需要网络数据获取，使用mcp调用类型的任务
            - 如果需要复杂计算，使用本地计算类型的任务
            - 如果需要数据处理，使用数据处理类型的任务
-        6. 在任务描述中明确指出使用的MCP服务名称，例如："使用default服务获取棉花最新新闻"
-        7. 避免创建无法执行的任务，确保任务描述与可用服务匹配
+        6. 在任务描述中明确指出使用的MCP服务名和工具名，格式为："使用[服务名]的[工具名]获取..."
+        7. 优先使用相关性高的MCP工具
+        8. 避免创建无法执行的任务，确保任务描述与可用工具匹配
+        9. 注意工具的参数要求，在任务描述中明确需要的参数
         """
         
         try:
@@ -373,10 +484,10 @@ class PlannerModel:
                 ))
             return dependencies
     
-    def _regenerate_graph(self, user_query: str, session_id: str) -> TaskGraph:
+    async def _regenerate_graph(self, user_query: str, session_id: str) -> TaskGraph:
         """Regenerate task graph if cycle detected"""
         self.database.log_event(session_id, "planner", "regenerating_graph", "Cycle detected, regenerating with sequential execution")
-        
+
         # Create a simple sequential task graph as fallback
         tasks = [
             TaskNode(
@@ -401,7 +512,7 @@ class PlannerModel:
                 priority=1
             )
         ]
-        
+
         dependencies = [
             TaskEdge(
                 from_task_id="T1",
@@ -414,5 +525,5 @@ class PlannerModel:
                 dependency_type=DependencyType.RESULT_DEPENDENCY
             )
         ]
-        
+
         return TaskGraph(nodes=tasks, edges=dependencies)
