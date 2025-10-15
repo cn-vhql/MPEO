@@ -602,13 +602,16 @@ class JSONRPCMCPClient:
         timeout = ClientTimeout(
             total=self.config.timeout,
             connect=min(self.config.timeout // 3, 20),
-            sock_read=max(self.config.timeout - 10, 40)
+            sock_read=max(self.config.timeout - 10, 40),
+            sock_connect=10
         )
 
         headers = {
             "User-Agent": "MPEO-MCP-Client/2.0",
             "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
+            "Accept": "application/json, text/event-stream",
+            "Accept-Encoding": "gzip, deflate",  # 支持压缩
+            "Connection": "keep-alive"
         }
 
         self.session = aiohttp.ClientSession(
@@ -735,8 +738,8 @@ class JSONRPCMCPClient:
             self._is_initialized = False
             self._session_id = None
 
-    async def _send_jsonrpc_request(self, method: str, params: Optional[Dict] = None) -> Any:
-        """发送JSON-RPC请求"""
+    async def _send_jsonrpc_request(self, method: str, params: Optional[Dict] = None, max_retries: int = 3) -> Any:
+        """发送JSON-RPC请求，带重试机制"""
         if not self._is_initialized:
             await self.initialize()
 
@@ -759,30 +762,82 @@ class JSONRPCMCPClient:
 
         self.logger.debug(f"Sending JSON-RPC request: {method} (ID: {request_id}) with params: {params}")
 
-        try:
-            async with self.session.post(self._endpoint_url, json=payload, headers=headers) as response:
-                if response.status == 200:
-                    response_text = await response.text()
-                    self.logger.debug(f"JSON-RPC response: {response_text[:200]}")
+        for attempt in range(max_retries):
+            try:
+                # 使用更长的超时时间和更好的错误处理
+                timeout = aiohttp.ClientTimeout(
+                    total=60,  # 更长的总超时
+                    connect=15,  # 连接超时
+                    sock_read=45  # 读取超时
+                )
 
-                    try:
-                        data = json.loads(response_text)
-                        if "error" in data:
-                            error = data["error"]
-                            self.logger.error(f"JSON-RPC error: {error}")
-                            raise RuntimeError(f"JSON-RPC error: {error}")
-                        return data.get("result")
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Invalid JSON in JSON-RPC response: {e}")
-                        raise
+                async with self.session.post(
+                    self._endpoint_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    allow_redirects=True
+                ) as response:
+
+                    if response.status == 200:
+                        try:
+                            # 尝试读取响应，处理ContentLengthError
+                            response_text = await response.text()
+                            self.logger.debug(f"JSON-RPC response (attempt {attempt + 1}): {response_text[:200]}")
+
+                            if not response_text:
+                                raise RuntimeError("Empty response from server")
+
+                            try:
+                                data = json.loads(response_text)
+                                if "error" in data:
+                                    error = data["error"]
+                                    self.logger.error(f"JSON-RPC error: {error}")
+                                    raise RuntimeError(f"JSON-RPC error: {error}")
+                                return data.get("result")
+                            except json.JSONDecodeError as e:
+                                self.logger.error(f"Invalid JSON in JSON-RPC response: {e}")
+                                self.logger.error(f"Response text: {response_text[:500]}")
+                                raise RuntimeError(f"Invalid JSON response: {e}")
+
+                        except aiohttp.ClientPayloadError as e:
+                            self.logger.warning(f"Payload error on attempt {attempt + 1}: {e}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(1 * (attempt + 1))  # 指数退避
+                                continue
+                            else:
+                                raise RuntimeError(f"Payload error after {max_retries} attempts: {e}")
+
+                    else:
+                        error_text = await response.text()
+                        self.logger.error(f"JSON-RPC request failed with status {response.status}: {error_text}")
+                        raise RuntimeError(f"JSON-RPC request failed: HTTP {response.status}")
+
+            except aiohttp.ClientConnectorError as e:
+                self.logger.warning(f"Connection error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
                 else:
-                    error_text = await response.text()
-                    self.logger.error(f"JSON-RPC request failed with status {response.status}: {error_text}")
-                    raise RuntimeError(f"JSON-RPC request failed: {error_text}")
+                    raise RuntimeError(f"Connection failed after {max_retries} attempts: {e}")
 
-        except Exception as e:
-            self.logger.error(f"Failed to send JSON-RPC request {method}: {e}")
-            raise
+            except asyncio.TimeoutError as e:
+                self.logger.warning(f"Timeout error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                else:
+                    raise RuntimeError(f"Request timeout after {max_retries} attempts: {e}")
+
+            except Exception as e:
+                self.logger.error(f"Unexpected error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+                else:
+                    raise
+
+        raise RuntimeError(f"Failed to send JSON-RPC request {method} after {max_retries} attempts")
 
     async def list_tools(self) -> List[MCPTool]:
         """获取可用工具列表"""
