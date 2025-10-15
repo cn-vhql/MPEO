@@ -223,7 +223,7 @@ class TaskExecutor:
                 if task.task_type == TaskType.LOCAL_COMPUTE:
                     output = await self._execute_local_compute(task, input_data, user_query, session_id)
                 elif task.task_type == TaskType.MCP_CALL:
-                    output = await self._execute_mcp_call(task, input_data, session_id)
+                    output = await self._execute_mcp_call(task, input_data, user_query, session_id)
                 elif task.task_type == TaskType.DATA_PROCESSING:
                     output = await self._execute_data_processing(task, input_data, session_id)
                 else:
@@ -327,7 +327,7 @@ class TaskExecutor:
         return response.choices[0].message.content
     
     async def _execute_mcp_call(self, task: TaskNode, input_data: Dict[str, Any],
-                              session_id: str) -> Any:
+                              user_query: str, session_id: str) -> Any:
         """Execute MCP service call using the new MCP service manager"""
         if self.mcp_manager is None:
             raise ValueError("MCP service manager not initialized")
@@ -350,12 +350,7 @@ class TaskExecutor:
             tool_name = self._extract_tool_name(task.task_desc)
 
             # Prepare arguments for the tool call
-            arguments = {
-                "task_id": task.task_id,
-                "task_desc": task.task_desc,
-                "expected_output": task.expected_output,
-                "input_data": input_data
-            }
+            arguments = await self._prepare_tool_arguments(tool_name, task, input_data, user_query)
 
             self.database.log_event(session_id, "executor", "mcp_tool_call",
                                    f"Calling tool: {tool_name} on service: {service_name}")
@@ -442,6 +437,106 @@ class TaskExecutor:
         else:
             # Default tool name
             return "execute"
+
+    async def _prepare_tool_arguments(self, tool_name: str, task: TaskNode,
+                                   input_data: Dict[str, Any], user_query: str) -> Dict[str, Any]:
+        """Prepare arguments for MCP tool call based on tool requirements"""
+
+        # Get tool schema from MCP manager
+        tool_schema = None
+        try:
+            if self.mcp_manager:
+                # Get the service that contains this tool
+                service_name = self._extract_service_name(task.task_desc)
+                if service_name and self.mcp_manager.is_service_registered(service_name):
+                    tools = await self.mcp_manager.get_available_tools(service_name)
+                    if service_name in tools:
+                        for tool in tools[service_name]:
+                            if tool.name == tool_name:
+                                tool_schema = tool.input_schema
+                                break
+        except Exception as e:
+            self.database.log_event(None, "executor", "tool_schema_error",
+                                   f"Failed to get schema for {tool_name}: {str(e)}")
+
+        # Prepare arguments based on tool schema
+        if tool_name == "fetch" and tool_schema:
+            arguments = {}
+
+            # Extract URL from task description, user query, or input data
+            url = self._extract_url_from_context(task.task_desc, user_query, input_data)
+            if url:
+                arguments["url"] = url
+            else:
+                # Try to extract from the task description itself
+                url = self._extract_url_from_text(task.task_desc)
+                if url:
+                    arguments["url"] = url
+
+            # Add optional parameters if defaults are available
+            if "properties" in tool_schema:
+                for param_name, param_info in tool_schema["properties"].items():
+                    if param_name not in arguments and "default" in param_info:
+                        arguments[param_name] = param_info["default"]
+
+            return arguments
+
+        # Default argument preparation for other tools
+        return {
+            "task_id": task.task_id,
+            "task_desc": task.task_desc,
+            "expected_output": task.expected_output,
+            "input_data": input_data
+        }
+
+    def _extract_url_from_context(self, task_desc: str, user_query: str, input_data: Dict[str, Any]) -> Optional[str]:
+        """Extract URL from task description, user query, or input data"""
+
+        # First, try to extract from user query
+        url = self._extract_url_from_text(user_query)
+        if url:
+            return url
+
+        # Then, try to extract from task description
+        url = self._extract_url_from_text(task_desc)
+        if url:
+            return url
+
+        # Finally, try to extract from input data
+        for key, value in input_data.items():
+            if isinstance(value, str):
+                url = self._extract_url_from_text(value)
+                if url:
+                    return url
+            elif isinstance(value, dict):
+                # recursively search in dict values
+                dict_result = self._extract_url_from_context("", "", value)
+                if dict_result:
+                    return dict_result
+
+        return None
+
+    def _extract_url_from_text(self, text: str) -> Optional[str]:
+        """Extract URL from text using regex patterns"""
+        import re
+
+        # Common URL patterns
+        url_patterns = [
+            r'https?://[^\s\)\]}]+',  # Standard URLs
+            r'(?:https?://)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s\)\]}]+)?',  # More lenient
+        ]
+
+        for pattern in url_patterns:
+            matches = re.findall(pattern, text)
+            if matches:
+                # Return the first match that looks like a complete URL
+                for match in matches:
+                    if match.startswith('http'):
+                        return match
+                    elif '.' in match and len(match) > 10:  # Basic validation
+                        return f"https://{match}"
+
+        return None
 
     async def cleanup_mcp_manager(self):
         """Cleanup MCP service manager"""
