@@ -60,8 +60,8 @@ class SystemCoordinator:
         logging.info(f"Logging system initialized. Log file: {log_filename}")
     
     def __init__(self, config: Optional[SystemConfig] = None):
-        # Load environment variables
-        load_dotenv()
+        # Load environment variables, overriding existing ones
+        load_dotenv(override=True)
         
         # Setup logging system
         self._setup_logging()
