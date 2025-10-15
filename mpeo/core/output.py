@@ -7,16 +7,28 @@ from typing import Dict, List, Any, Optional
 from openai import OpenAI
 
 from ..models import TaskGraph, ExecutionResults, TaskStatus
+from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
 
 
 class OutputModel:
     """Output model for result integration and final answer generation"""
-    
-    def __init__(self, openai_client: OpenAI, database: DatabaseManager, model_name: str = "gpt-3.5-turbo"):
+
+    def __init__(self, openai_client: OpenAI, database: DatabaseManager,
+                 model_config: AgentModelConfig = None):
         self.client = openai_client
         self.database = database
-        self.model_name = model_name
+        self.model_config = model_config or AgentModelConfig(
+            model_name="gpt-3.5-turbo",
+            temperature=0.4,
+            max_tokens=2500,
+            timeout=45
+        )
+
+    @property
+    def model_name(self) -> str:
+        """获取模型名称"""
+        return self.model_config.model_name
     
     def generate_final_output(self, 
                             execution_results: ExecutionResults,
@@ -211,13 +223,19 @@ class OutputModel:
         """
         
         try:
+            messages = [
+                {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的结果整合专家，擅长将多个任务的执行结果整合为完整、准确的答案。"},
+                {"role": "user", "content": prompt}
+            ]
+
             response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": "你是一个专业的结果整合专家，擅长将多个任务的执行结果整合为完整、准确的答案。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3
+                model=self.model_config.model_name,
+                messages=messages,
+                temperature=self.model_config.temperature,
+                max_tokens=self.model_config.max_tokens,
+                top_p=self.model_config.top_p,
+                frequency_penalty=self.model_config.frequency_penalty,
+                presence_penalty=self.model_config.presence_penalty
             )
             
             return response.choices[0].message.content

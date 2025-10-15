@@ -7,17 +7,29 @@ import uuid
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from ..models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType
+from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
 
 
 class PlannerModel:
     """Planner model for task decomposition and DAG generation"""
-    
-    def __init__(self, openai_client: OpenAI, database: DatabaseManager, model_name: str = "gpt-3.5-turbo"):
+
+    def __init__(self, openai_client: OpenAI, database: DatabaseManager,
+                 model_config: AgentModelConfig = None):
         self.client = openai_client
         self.database = database
-        self.model_name = model_name
+        self.model_config = model_config or AgentModelConfig(
+            model_name="gpt-3.5-turbo",
+            temperature=0.3,
+            max_tokens=2000,
+            timeout=60
+        )
         self.available_mcp_services = []
+
+    @property
+    def model_name(self) -> str:
+        """获取模型名称"""
+        return self.model_config.model_name
     
     def update_mcp_services(self, mcp_services: List[str]):
         """Update available MCP services for planning"""
@@ -97,13 +109,21 @@ class PlannerModel:
         
         try:
             print(f"[DEBUG] Planner - Making API call to analyze query...")
+            print(f"[DEBUG] Planner - Using model: {self.model_config.model_name}, temperature: {self.model_config.temperature}")
+
+            messages = [
+                {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的需求分析师，擅长将用户需求结构化。"},
+                {"role": "user", "content": prompt}
+            ]
+
             response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": "你是一个专业的需求分析师，擅长将用户需求结构化。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3
+                model=self.model_config.model_name,
+                messages=messages,
+                temperature=self.model_config.temperature,
+                max_tokens=self.model_config.max_tokens,
+                top_p=self.model_config.top_p,
+                frequency_penalty=self.model_config.frequency_penalty,
+                presence_penalty=self.model_config.presence_penalty
             )
             print(f"[DEBUG] Planner - API call successful, response status: {response.choices[0].finish_reason if response.choices else 'No choices'}")
             
@@ -188,13 +208,21 @@ class PlannerModel:
         
         try:
             print(f"[DEBUG] Planner - Making API call to generate tasks...")
+            print(f"[DEBUG] Planner - Using model: {self.model_config.model_name}, temperature: {self.model_config.temperature}")
+
+            messages = [
+                {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的任务分解专家，擅长将复杂需求分解为可执行的任务，并且能够根据可用的MCP服务合理规划任务。"},
+                {"role": "user", "content": prompt}
+            ]
+
             response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": "你是一个专业的任务分解专家，擅长将复杂需求分解为可执行的任务，并且能够根据可用的MCP服务合理规划任务。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3
+                model=self.model_config.model_name,
+                messages=messages,
+                temperature=self.model_config.temperature,
+                max_tokens=self.model_config.max_tokens,
+                top_p=self.model_config.top_p,
+                frequency_penalty=self.model_config.frequency_penalty,
+                presence_penalty=self.model_config.presence_penalty
             )
             print(f"[DEBUG] Planner - Task generation API call successful")
             
@@ -281,13 +309,19 @@ class PlannerModel:
         4. 如果任务可以并行执行，不要创建依赖关系
         """
         
+        messages = [
+            {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的任务调度专家，擅长定义任务间的合理依赖关系。"},
+            {"role": "user", "content": prompt}
+        ]
+
         response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": "你是一个专业的任务调度专家，擅长定义任务间的合理依赖关系。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2
+            model=self.model_config.model_name,
+            messages=messages,
+            temperature=self.model_config.temperature * 0.7,  # 依赖关系生成使用更低的温度
+            max_tokens=self.model_config.max_tokens,
+            top_p=self.model_config.top_p,
+            frequency_penalty=self.model_config.frequency_penalty,
+            presence_penalty=self.model_config.presence_penalty
         )
         
         response_text = response.choices[0].message.content

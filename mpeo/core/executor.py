@@ -12,24 +12,37 @@ import aiohttp
 from openai import OpenAI
 
 from ..models import (
-    TaskGraph, TaskNode, TaskEdge, TaskType, TaskStatus, 
+    TaskGraph, TaskNode, TaskEdge, TaskType, TaskStatus,
     ExecutionResult, ExecutionResults, SystemConfig, MCPServiceConfig
 )
+from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
 
 
 class TaskExecutor:
     """Task executor with parallel and serial execution capabilities"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  openai_client: OpenAI,
                  database: DatabaseManager,
-                 config: SystemConfig):
+                 config: SystemConfig,
+                 model_config: AgentModelConfig = None):
         self.client = openai_client
         self.database = database
         self.config = config
+        self.model_config = model_config or AgentModelConfig(
+            model_name=config.openai_model,
+            temperature=0.2,
+            max_tokens=1500,
+            timeout=30
+        )
         self.mcp_services: Dict[str, MCPServiceConfig] = {}
         self.execution_context: Dict[str, Any] = {}
+
+    @property
+    def model_name(self) -> str:
+        """获取模型名称"""
+        return self.model_config.model_name
     
     def register_mcp_service(self, service_config: MCPServiceConfig):
         """Register an MCP service configuration"""
@@ -281,13 +294,19 @@ class TaskExecutor:
         确保输出格式符合预期要求。
         """
         
+        messages = [
+            {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的计算和处理助手，能够执行各种本地计算任务。"},
+            {"role": "user", "content": prompt}
+        ]
+
         response = self.client.chat.completions.create(
-            model=self.config.openai_model,
-            messages=[
-                {"role": "system", "content": "你是一个专业的计算和处理助手，能够执行各种本地计算任务。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3
+            model=self.model_config.model_name,
+            messages=messages,
+            temperature=self.model_config.temperature,
+            max_tokens=self.model_config.max_tokens,
+            top_p=self.model_config.top_p,
+            frequency_penalty=self.model_config.frequency_penalty,
+            presence_penalty=self.model_config.presence_penalty
         )
         
         return response.choices[0].message.content
@@ -594,13 +613,19 @@ class TaskExecutor:
         返回处理后的结果。
         """
         
+        messages = [
+            {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的数据处理专家，擅长各种数据分析和处理任务。"},
+            {"role": "user", "content": prompt}
+        ]
+
         response = self.client.chat.completions.create(
-            model=self.config.openai_model,
-            messages=[
-                {"role": "system", "content": "你是一个专业的数据处理专家，擅长各种数据分析和处理任务。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2
+            model=self.model_config.model_name,
+            messages=messages,
+            temperature=self.model_config.temperature,
+            max_tokens=self.model_config.max_tokens,
+            top_p=self.model_config.top_p,
+            frequency_penalty=self.model_config.frequency_penalty,
+            presence_penalty=self.model_config.presence_penalty
         )
         
         return response.choices[0].message.content
