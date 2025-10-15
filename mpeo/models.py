@@ -159,6 +159,7 @@ class TaskSession(BaseModel):
 class MCPServiceConfig(BaseModel):
     """MCP service configuration"""
     service_name: str = Field(..., description="Service name")
+    service_type: str = Field(default="http", description="Service type (http, sse, websocket)")
     endpoint_url: str = Field(..., description="Service endpoint URL")
     timeout: int = Field(default=30, description="Request timeout")
     headers: Optional[Dict[str, str]] = Field(default=None, description="Request headers")

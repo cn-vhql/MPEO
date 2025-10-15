@@ -298,11 +298,48 @@ class TaskExecutor:
         # Extract service name from task description or use default
         service_name = self._extract_service_name(task.task_desc)
         
+        self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                               f"Task: {task.task_id}, Extracted service name: {service_name}")
+        
         if service_name not in self.mcp_services:
+            available_services = list(self.mcp_services.keys())
+            self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                                   f"Service '{service_name}' not registered. Available services: {available_services}")
             raise ValueError(f"MCP service '{service_name}' not registered")
         
         service_config = self.mcp_services[service_name]
         
+        self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                               f"Service config: name={service_config.service_name}, type={service_config.service_type}, url={service_config.endpoint_url}")
+        self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                               f"Input data: {json.dumps(input_data, ensure_ascii=False)}")
+        
+        # Make HTTP request to MCP service based on service type
+        async with aiohttp.ClientSession() as session:
+            try:
+                if service_config.service_type == "sse":
+                    # Handle SSE (Server-Sent Events) service
+                    self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                                           f"Routing to SSE call method")
+                    return await self._execute_sse_call(session, service_config, task, input_data, session_id)
+                else:
+                    # Handle regular HTTP service
+                    self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                                           f"Routing to HTTP call method")
+                    return await self._execute_http_call(session, service_config, task, input_data, session_id)
+                        
+            except asyncio.TimeoutError:
+                self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                                       f"Timeout after {service_config.timeout} seconds")
+                raise Exception(f"MCP service call timeout after {service_config.timeout} seconds")
+            except Exception as e:
+                self.database.log_event(session_id, "executor", "mcp_call_debug", 
+                                       f"Exception: {type(e).__name__}: {str(e)}")
+                raise Exception(f"MCP service call failed: {str(e)}")
+    
+    async def _execute_http_call(self, session: aiohttp.ClientSession, service_config: MCPServiceConfig,
+                                task: TaskNode, input_data: Dict[str, Any], session_id: str) -> Any:
+        """Execute regular HTTP MCP service call"""
         # Prepare request payload
         payload = {
             "task_id": task.task_id,
@@ -310,28 +347,147 @@ class TaskExecutor:
             "timeout": service_config.timeout
         }
         
-        # Make HTTP request to MCP service
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    service_config.endpoint_url,
-                    json=payload,
-                    headers=service_config.headers or {},
-                    timeout=aiohttp.ClientTimeout(total=service_config.timeout)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        self.database.log_event(session_id, "executor", "mcp_call_success", 
-                                               f"Service: {service_name}, Task: {task.task_id}")
+        headers = service_config.headers or {}
+        
+        self.database.log_event(session_id, "executor", "http_call_debug", 
+                               f"POST URL: {service_config.endpoint_url}")
+        self.database.log_event(session_id, "executor", "http_call_debug", 
+                               f"Headers: {json.dumps(headers, ensure_ascii=False)}")
+        self.database.log_event(session_id, "executor", "http_call_debug", 
+                               f"Payload: {json.dumps(payload, ensure_ascii=False)}")
+        
+        async with session.post(
+            service_config.endpoint_url,
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=service_config.timeout)
+        ) as response:
+            self.database.log_event(session_id, "executor", "http_call_debug", 
+                                   f"Response status: {response.status}")
+            self.database.log_event(session_id, "executor", "http_call_debug", 
+                                   f"Response headers: {dict(response.headers)}")
+            
+            if response.status == 200:
+                response_text = await response.text()
+                self.database.log_event(session_id, "executor", "http_call_debug", 
+                                       f"Response body: {response_text[:500]}...")
+                try:
+                    result = json.loads(response_text)
+                    self.database.log_event(session_id, "executor", "mcp_call_success", 
+                                           f"Service: {service_config.service_name}, Task: {task.task_id}")
+                    return result
+                except json.JSONDecodeError as e:
+                    self.database.log_event(session_id, "executor", "http_call_debug", 
+                                           f"JSON parse error: {str(e)}")
+                    return response_text
+            else:
+                error_text = await response.text()
+                self.database.log_event(session_id, "executor", "http_call_debug", 
+                                       f"Error response: {error_text}")
+                raise Exception(f"MCP service returned status {response.status}: {error_text}")
+    
+    async def _execute_sse_call(self, session: aiohttp.ClientSession, service_config: MCPServiceConfig,
+                              task: TaskNode, input_data: Dict[str, Any], session_id: str) -> Any:
+        """Execute SSE (Server-Sent Events) MCP service call"""
+        
+        # Prepare request payload for POST request
+        payload = {
+            "task_id": task.task_id,
+            "input_data": input_data,
+            "timeout": service_config.timeout
+        }
+        
+        # Prepare headers for SSE
+        headers = service_config.headers or {}
+        headers.setdefault("Accept", "text/event-stream")
+        headers.setdefault("Cache-Control", "no-cache")
+        headers.setdefault("Content-Type", "application/json")
+        
+        self.database.log_event(session_id, "executor", "sse_call_start", 
+                               f"Service: {service_config.service_name}, Task: {task.task_id}")
+        self.database.log_event(session_id, "executor", "sse_call_debug", 
+                               f"POST URL: {service_config.endpoint_url}")
+        self.database.log_event(session_id, "executor", "sse_call_debug", 
+                               f"Headers: {json.dumps(headers, ensure_ascii=False)}")
+        self.database.log_event(session_id, "executor", "sse_call_debug", 
+                               f"Payload: {json.dumps(payload, ensure_ascii=False)}")
+        
+        async with session.post(
+            service_config.endpoint_url,
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=service_config.timeout)
+        ) as response:
+            self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                   f"Response status: {response.status}")
+            self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                   f"Response headers: {dict(response.headers)}")
+            
+            if response.status == 200:
+                # Check if response is SSE
+                content_type = response.headers.get('Content-Type', '')
+                self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                       f"Content-Type: {content_type}")
+                
+                if 'text/event-stream' in content_type:
+                    # Handle SSE stream
+                    self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                           f"Processing SSE stream...")
+                    events = []
+                    line_count = 0
+                    async for line in response.content:
+                        if line:
+                            line_text = line.decode('utf-8').strip()
+                            # Handle both 'data:' and 'data: ' formats
+                            if line_text.startswith('data:'):
+                                if line_text.startswith('data: '):
+                                    event_data = line_text[6:]  # Remove 'data: ' prefix
+                                else:
+                                    event_data = line_text[5:]  # Remove 'data:' prefix
+                                if event_data:
+                                    self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                                           f"Event {line_count}: {event_data[:100]}...")
+                                    line_count += 1
+                                    try:
+                                        # Try to parse as JSON
+                                        event_json = json.loads(event_data)
+                                        events.append(event_json)
+                                    except json.JSONDecodeError:
+                                        # Keep as text if not JSON
+                                        events.append(event_data)
+                    
+                    self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                           f"Total events received: {len(events)}")
+                    
+                    if events:
+                        # Return the last event or all events
+                        result = events[-1] if len(events) == 1 else {"events": events}
+                        self.database.log_event(session_id, "executor", "sse_call_success", 
+                                               f"Service: {service_config.service_name}, Task: {task.task_id}")
                         return result
                     else:
-                        error_text = await response.text()
-                        raise Exception(f"MCP service returned status {response.status}: {error_text}")
-                        
-            except asyncio.TimeoutError:
-                raise Exception(f"MCP service call timeout after {service_config.timeout} seconds")
-            except Exception as e:
-                raise Exception(f"MCP service call failed: {str(e)}")
+                        self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                               f"No events received from SSE stream")
+                        raise Exception("No events received from SSE stream")
+                else:
+                    # Handle as regular response
+                    response_text = await response.text()
+                    self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                           f"Non-SSE response: {response_text[:500]}...")
+                    try:
+                        result = json.loads(response_text)
+                        self.database.log_event(session_id, "executor", "sse_call_success", 
+                                               f"Service: {service_config.service_name}, Task: {task.task_id}")
+                        return result
+                    except json.JSONDecodeError as e:
+                        self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                               f"JSON parse error: {str(e)}")
+                        return response_text
+            else:
+                error_text = await response.text()
+                self.database.log_event(session_id, "executor", "sse_call_debug", 
+                                       f"Error response: {error_text}")
+                raise Exception(f"MCP SSE service returned status {response.status}: {error_text}")
     
     def _extract_service_name(self, task_desc: str) -> str:
         """Extract MCP service name from task description"""

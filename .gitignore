@@ -13,3 +13,5 @@ wheels/
 logs/
 todo.md
 mpeo.db
+mpeo.db
+mcp_config.json

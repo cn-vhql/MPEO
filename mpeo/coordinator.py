@@ -144,6 +144,7 @@ class SystemCoordinator:
                             # Convert config to MCPServiceConfig
                             mcp_config = MCPServiceConfig(
                                 service_name=service_name,
+                                service_type=service_config.get("type", "http"),
                                 endpoint_url=service_config.get("url", ""),
                                 timeout=service_config.get("timeout", 30),
                                 headers=service_config.get("headers", {})

@@ -1,17 +1,17 @@
 {
   "mcpServices": {
-    "default": {
+    "fetch": {
       "type": "sse",
-      "url": "https://mcp.api-inference.modelscope.net/f72f96405fff4b/sse",
+      "url": "https://mcp.api-inference.modelscope.net/06178f20f6b343/sse",
       "timeout": 30,
       "headers": {
         "Content-Type": "application/json",
         "Accept": "text/event-stream"
       }
     },
-    "fetch": {
+    "bing-cn-mcp-server": {
       "type": "sse",
-      "url": "https://mcp.api-inference.modelscope.net/f72f96405fff4b/sse",
+      "url": "https://mcp.api-inference.modelscope.net/709e37c4ef5847/sse",
       "timeout": 30,
       "headers": {
         "Content-Type": "application/json",
