@@ -223,8 +223,8 @@ debug_*.py
 test_*.py
 temp_*.py
 
-# MCP service artifacts
-mcp_*.json
+# MCP service artifacts (exclude config directory)
+mcp_config.json
 mcp_*.md
 
 # Build artifacts
