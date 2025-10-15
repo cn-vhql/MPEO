@@ -17,6 +17,7 @@ from ..models import (
 )
 from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
+from ..services.mcp_manager import MCPServiceManager, MCPResult
 
 
 class TaskExecutor:
@@ -37,6 +38,7 @@ class TaskExecutor:
             timeout=30
         )
         self.mcp_services: Dict[str, MCPServiceConfig] = {}
+        self.mcp_manager: Optional[MCPServiceManager] = None
         self.execution_context: Dict[str, Any] = {}
 
     @property
@@ -44,11 +46,24 @@ class TaskExecutor:
         """获取模型名称"""
         return self.model_config.model_name
     
-    def register_mcp_service(self, service_config: MCPServiceConfig):
+    async def register_mcp_service(self, service_config: MCPServiceConfig):
         """Register an MCP service configuration"""
         self.mcp_services[service_config.service_name] = service_config
-        self.database.log_event(None, "executor", "mcp_service_registered", 
-                               f"Service: {service_config.service_name}")
+
+        # Initialize MCP manager if needed
+        if self.mcp_manager is None:
+            self.mcp_manager = MCPServiceManager()
+            await self.mcp_manager.initialize()
+
+        # Register service with manager
+        success = await self.mcp_manager.register_from_service_config(service_config)
+
+        if success:
+            self.database.log_event(None, "executor", "mcp_service_registered",
+                                   f"Service: {service_config.service_name}")
+        else:
+            self.database.log_event(None, "executor", "mcp_service_registration_failed",
+                                   f"Service: {service_config.service_name}")
     
     async def execute_task_graph(self, task_graph: TaskGraph, user_query: str, session_id: str) -> ExecutionResults:
         """
@@ -311,252 +326,62 @@ class TaskExecutor:
         
         return response.choices[0].message.content
     
-    async def _execute_mcp_call(self, task: TaskNode, input_data: Dict[str, Any], 
+    async def _execute_mcp_call(self, task: TaskNode, input_data: Dict[str, Any],
                               session_id: str) -> Any:
-        """Execute MCP service call"""
+        """Execute MCP service call using the new MCP service manager"""
+        if self.mcp_manager is None:
+            raise ValueError("MCP service manager not initialized")
+
         # Extract service name from task description or use default
         service_name = self._extract_service_name(task.task_desc)
-        
-        self.database.log_event(session_id, "executor", "mcp_call_debug", 
-                               f"Task: {task.task_id}, Extracted service name: {service_name}")
-        
-        if service_name not in self.mcp_services:
-            available_services = list(self.mcp_services.keys())
-            self.database.log_event(session_id, "executor", "mcp_call_debug", 
-                                   f"Service '{service_name}' not registered. Available services: {available_services}")
+
+        self.database.log_event(session_id, "executor", "mcp_call_start",
+                               f"Task: {task.task_id}, Service: {service_name}")
+
+        # Check if service is registered
+        if not self.mcp_manager.is_service_registered(service_name):
+            available_services = self.mcp_manager.get_registered_services()
+            self.database.log_event(session_id, "executor", "mcp_service_not_found",
+                                   f"Service '{service_name}' not registered. Available: {available_services}")
             raise ValueError(f"MCP service '{service_name}' not registered")
-        
-        service_config = self.mcp_services[service_name]
-        
-        self.database.log_event(session_id, "executor", "mcp_call_debug", 
-                               f"Service config: name={service_config.service_name}, type={service_config.service_type}, url={service_config.endpoint_url}")
-        self.database.log_event(session_id, "executor", "mcp_call_debug", 
-                               f"Input data: {json.dumps(input_data, ensure_ascii=False)}")
-        
-        # Make HTTP request to MCP service based on service type
-        async with aiohttp.ClientSession() as session:
-            try:
-                if service_config.service_type == "sse":
-                    # Handle SSE (Server-Sent Events) service
-                    self.database.log_event(session_id, "executor", "mcp_call_debug", 
-                                           f"Routing to SSE call method")
-                    return await self._execute_sse_call(session, service_config, task, input_data, session_id)
-                else:
-                    # Handle regular HTTP service
-                    self.database.log_event(session_id, "executor", "mcp_call_debug", 
-                                           f"Routing to HTTP call method")
-                    return await self._execute_http_call(session, service_config, task, input_data, session_id)
-                        
-            except asyncio.TimeoutError:
-                self.database.log_event(session_id, "executor", "mcp_call_debug",
-                                       f"Timeout after 60 seconds")
-                raise Exception(f"MCP service call timeout after 60 seconds")
-            except aiohttp.ClientError as e:
-                self.database.log_event(session_id, "executor", "mcp_call_debug",
-                                       f"HTTP client error: {type(e).__name__}: {str(e)}")
-                raise Exception(f"MCP service HTTP error: {str(e)}")
-            except Exception as e:
-                self.database.log_event(session_id, "executor", "mcp_call_debug",
-                                       f"Exception: {type(e).__name__}: {str(e)}")
-                import traceback
-                self.database.log_event(session_id, "executor", "mcp_call_debug",
-                                       f"Traceback: {traceback.format_exc()}")
-                raise Exception(f"MCP service call failed: {str(e)}")
-    
-    async def _execute_http_call(self, session: aiohttp.ClientSession, service_config: MCPServiceConfig,
-                                task: TaskNode, input_data: Dict[str, Any], session_id: str) -> Any:
-        """Execute regular HTTP MCP service call"""
-        # Prepare request payload
-        payload = {
-            "task_id": task.task_id,
-            "input_data": input_data,
-            "timeout": service_config.timeout
-        }
-        
-        headers = service_config.headers or {}
-        
-        self.database.log_event(session_id, "executor", "http_call_debug", 
-                               f"POST URL: {service_config.endpoint_url}")
-        self.database.log_event(session_id, "executor", "http_call_debug", 
-                               f"Headers: {json.dumps(headers, ensure_ascii=False)}")
-        self.database.log_event(session_id, "executor", "http_call_debug", 
-                               f"Payload: {json.dumps(payload, ensure_ascii=False)}")
-        
-        async with session.post(
-            service_config.endpoint_url,
-            json=payload,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=service_config.timeout)
-        ) as response:
-            self.database.log_event(session_id, "executor", "http_call_debug", 
-                                   f"Response status: {response.status}")
-            self.database.log_event(session_id, "executor", "http_call_debug", 
-                                   f"Response headers: {dict(response.headers)}")
-            
-            if response.status == 200:
-                response_text = await response.text()
-                self.database.log_event(session_id, "executor", "http_call_debug", 
-                                       f"Response body: {response_text[:500]}...")
-                try:
-                    result = json.loads(response_text)
-                    self.database.log_event(session_id, "executor", "mcp_call_success", 
-                                           f"Service: {service_config.service_name}, Task: {task.task_id}")
-                    return result
-                except json.JSONDecodeError as e:
-                    self.database.log_event(session_id, "executor", "http_call_debug", 
-                                           f"JSON parse error: {str(e)}")
-                    return response_text
+
+        try:
+            # Extract tool name from task description
+            tool_name = self._extract_tool_name(task.task_desc)
+
+            # Prepare arguments for the tool call
+            arguments = {
+                "task_id": task.task_id,
+                "task_desc": task.task_desc,
+                "expected_output": task.expected_output,
+                "input_data": input_data
+            }
+
+            self.database.log_event(session_id, "executor", "mcp_tool_call",
+                                   f"Calling tool: {tool_name} on service: {service_name}")
+
+            # Call the tool through the MCP manager
+            result: MCPResult = await self.mcp_manager.call_tool(
+                service_name=service_name,
+                tool_name=tool_name,
+                arguments=arguments
+            )
+
+            # Log the result
+            if result.success:
+                self.database.log_event(session_id, "executor", "mcp_call_success",
+                                       f"Tool {tool_name} completed in {result.execution_time:.2f}s")
+                return result.data
             else:
-                error_text = await response.text()
-                self.database.log_event(session_id, "executor", "http_call_debug", 
-                                       f"Error response: {error_text}")
-                raise Exception(f"MCP service returned status {response.status}: {error_text}")
-    
-    async def _execute_sse_call(self, session: aiohttp.ClientSession, service_config: MCPServiceConfig,
-                              task: TaskNode, input_data: Dict[str, Any], session_id: str) -> Any:
-        """Execute SSE (Server-Sent Events) MCP service call using proper MCP protocol"""
+                self.database.log_event(session_id, "executor", "mcp_call_failed",
+                                       f"Tool {tool_name} failed: {result.error}")
+                raise Exception(f"MCP tool call failed: {result.error}")
 
-        self.database.log_event(session_id, "executor", "sse_call_start",
-                               f"Service: {service_config.service_name}, Task: {task.task_id}")
-
-        # Step 1: Establish SSE connection to get endpoint and session_id
-        try:
-            headers = {
-                "Accept": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive"
-            }
-
-            timeout = aiohttp.ClientTimeout(total=15, connect=10, sock_read=5)
-
-            self.database.log_event(session_id, "executor", "sse_call_debug",
-                                   f"Step 1: Establishing SSE connection to {service_config.endpoint_url}")
-
-            async with session.get(
-                service_config.endpoint_url,
-                headers=headers,
-                timeout=timeout
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(f"SSE connection failed with status {response.status}: {error_text}")
-
-                content_type = response.headers.get('Content-Type', '')
-                if 'text/event-stream' not in content_type:
-                    # Try to handle as regular HTTP response
-                    response_text = await response.text()
-                    self.database.log_event(session_id, "executor", "sse_call_debug",
-                                           f"Non-SSE response received: {response_text[:200]}...")
-                    try:
-                        result = json.loads(response_text)
-                        self.database.log_event(session_id, "executor", "sse_call_success",
-                                               f"Service: {service_config.service_name}, Task: {task.task_id}")
-                        return result
-                    except json.JSONDecodeError:
-                        return response_text
-
-                # Parse SSE response to get endpoint and session_id
-                endpoint_info = None
-                line_count = 0
-
-                async with asyncio.timeout(10):
-                    async for line in response.content:
-                        if line:
-                            line_text = line.decode('utf-8').strip()
-                            line_count += 1
-
-                            self.database.log_event(session_id, "executor", "sse_call_debug",
-                                                   f"SSE line {line_count}: {line_text[:100]}...")
-
-                            # Look for endpoint event
-                            if line_text.startswith('data: '):
-                                event_data = line_text[6:]
-                                if event_data.startswith('/messages/?session_id='):
-                                    endpoint_info = event_data
-                                    break
-
-                            # Stop after reasonable number of lines
-                            if line_count >= 10:
-                                break
-
-                if not endpoint_info:
-                    raise Exception("No endpoint information received from SSE stream")
-
-                # Extract session_id from endpoint
-                session_id_part = endpoint_info.split('session_id=')[1] if 'session_id=' in endpoint_info else None
-                if not session_id_part:
-                    raise Exception("No session_id found in endpoint")
-
-                self.database.log_event(session_id, "executor", "sse_call_debug",
-                                       f"Received endpoint: {endpoint_info}, session_id: {session_id_part}")
-
-        except asyncio.TimeoutError:
-            raise Exception("SSE connection timeout")
         except Exception as e:
-            raise Exception(f"Failed to establish SSE connection: {str(e)}")
+            self.database.log_event(session_id, "executor", "mcp_call_error",
+                                   f"MCP call failed: {str(e)}")
+            raise
 
-        # Step 2: Send actual request to the messages endpoint
-        try:
-            # Construct messages endpoint URL
-            base_url = service_config.endpoint_url.rstrip('/')
-            messages_url = f"{base_url}{endpoint_info}"
-
-            # Prepare request payload
-            payload = {
-                "input": {
-                    "task_id": task.task_id,
-                    "task_desc": task.task_desc,
-                    "expected_output": task.expected_output,
-                    "input_data": input_data
-                }
-            }
-
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-
-            timeout = aiohttp.ClientTimeout(total=45, connect=10, sock_read=35)
-
-            self.database.log_event(session_id, "executor", "sse_call_debug",
-                                   f"Step 2: Sending request to messages endpoint: {messages_url}")
-            self.database.log_event(session_id, "executor", "sse_call_debug",
-                                   f"Request payload: {json.dumps(payload, ensure_ascii=False)}")
-
-            async with session.post(
-                messages_url,
-                json=payload,
-                headers=headers,
-                timeout=timeout
-            ) as response:
-                self.database.log_event(session_id, "executor", "sse_call_debug",
-                                       f"Messages response status: {response.status}")
-
-                if response.status == 200:
-                    response_text = await response.text()
-                    self.database.log_event(session_id, "executor", "sse_call_debug",
-                                           f"Messages response: {response_text[:500]}...")
-
-                    try:
-                        result = json.loads(response_text)
-                        self.database.log_event(session_id, "executor", "sse_call_success",
-                                               f"Service: {service_config.service_name}, Task: {task.task_id}")
-                        return result
-                    except json.JSONDecodeError as e:
-                        self.database.log_event(session_id, "executor", "sse_call_debug",
-                                               f"JSON parse error: {str(e)}")
-                        return response_text
-                else:
-                    error_text = await response.text()
-                    self.database.log_event(session_id, "executor", "sse_call_debug",
-                                           f"Messages error response: {error_text}")
-                    raise Exception(f"MCP messages endpoint returned status {response.status}: {error_text}")
-
-        except asyncio.TimeoutError:
-            raise Exception("Messages request timeout")
-        except Exception as e:
-            raise Exception(f"Failed to send messages request: {str(e)}")
-    
     def _extract_service_name(self, task_desc: str) -> str:
         """Extract MCP service name from task description"""
         # Try to extract service name from task description
@@ -566,33 +391,65 @@ class TaskExecutor:
             if len(parts) > 1:
                 service_name = parts[1].split()[0]
                 # Check if this service is registered
-                if service_name in self.mcp_services:
+                if self.mcp_manager and self.mcp_manager.is_service_registered(service_name):
                     return service_name
 
         # Try to find service name in description
-        for service_name in self.mcp_services:
-            if service_name.lower() in task_desc.lower():
-                return service_name
+        if self.mcp_manager:
+            for service_name in self.mcp_manager.get_registered_services():
+                if service_name.lower() in task_desc.lower():
+                    return service_name
 
         # Enhanced service name extraction
         # Check for common MCP service patterns
         if "fetch" in task_desc.lower() or "获取" in task_desc:
-            if "fetch" in self.mcp_services:
+            if self.mcp_manager and self.mcp_manager.is_service_registered("fetch"):
                 return "fetch"
 
         if "bing" in task_desc.lower() or "搜索" in task_desc:
-            if "bing-cn-mcp-server" in self.mcp_services:
+            if self.mcp_manager and self.mcp_manager.is_service_registered("bing-cn-mcp-server"):
                 return "bing-cn-mcp-server"
 
         # Use first available service as default
-        if self.mcp_services:
-            first_service = list(self.mcp_services.keys())[0]
-            return first_service
+        if self.mcp_manager:
+            services = self.mcp_manager.get_registered_services()
+            if services:
+                return services[0]
 
         # No services available
         return "default"
-    
-    async def _execute_data_processing(self, task: TaskNode, input_data: Dict[str, Any], 
+
+    def _extract_tool_name(self, task_desc: str) -> str:
+        """Extract tool name from task description"""
+        # Look for common tool patterns in task description
+        task_desc_lower = task_desc.lower()
+
+        # Common tool name patterns
+        if "fetch" in task_desc_lower or "get" in task_desc_lower or "获取" in task_desc_lower:
+            return "fetch"
+        elif "search" in task_desc_lower or "查找" in task_desc_lower or "搜索" in task_desc_lower:
+            return "search"
+        elif "process" in task_desc_lower or "处理" in task_desc_lower:
+            return "process"
+        elif "analyze" in task_desc_lower or "分析" in task_desc_lower:
+            return "analyze"
+        elif "calculate" in task_desc_lower or "计算" in task_desc_lower:
+            return "calculate"
+        elif "translate" in task_desc_lower or "翻译" in task_desc_lower:
+            return "translate"
+        elif "summarize" in task_desc_lower or "总结" in task_desc_lower or "摘要" in task_desc_lower:
+            return "summarize"
+        else:
+            # Default tool name
+            return "execute"
+
+    async def cleanup_mcp_manager(self):
+        """Cleanup MCP service manager"""
+        if self.mcp_manager:
+            await self.mcp_manager.close()
+            self.mcp_manager = None
+
+    async def _execute_data_processing(self, task: TaskNode, input_data: Dict[str, Any],
                                      session_id: str) -> Any:
         """Execute data processing task"""
         prompt = f"""

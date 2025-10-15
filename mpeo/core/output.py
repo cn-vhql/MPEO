@@ -432,7 +432,16 @@ class OutputModel:
 """
         
         for output in key_outputs[:5]:  # Limit to top 5 outputs
-            fallback_output += f"\n任务 {output['task_id']}: {output['output']}\n"
+            # 确保输出是字符串格式
+            output_data = output['output']
+            if isinstance(output_data, dict):
+                output_str = str(output_data)
+            elif isinstance(output_data, list):
+                output_str = str(output_data)
+            else:
+                output_str = str(output_data)
+
+            fallback_output += f"\n任务 {output['task_id']}: {output_str}\n"
         
         if summary['failed_tasks'] > 0:
             fallback_output += f"\n注意：有 {summary['failed_tasks']} 个任务执行失败，可能影响结果的完整性。"
