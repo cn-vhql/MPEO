@@ -25,6 +25,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+CLAUDE.md
+mcp_services.json
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -258,3 +260,4 @@ development/
 # uv.lock
 # poetry.lock
 # Pipfile.lock
+config/mcp_services.json
