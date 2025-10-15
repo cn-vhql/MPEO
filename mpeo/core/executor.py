@@ -414,148 +414,148 @@ class TaskExecutor:
     
     async def _execute_sse_call(self, session: aiohttp.ClientSession, service_config: MCPServiceConfig,
                               task: TaskNode, input_data: Dict[str, Any], session_id: str) -> Any:
-        """Execute SSE (Server-Sent Events) MCP service call"""
-
-        # Prepare headers for SSE - use standard MCP protocol headers
-        headers = service_config.headers or {}
-        headers.setdefault("Accept", "text/event-stream")
-        headers.setdefault("Cache-Control", "no-cache")
-        headers.setdefault("Connection", "keep-alive")
-
-        # According to MCP protocol, use GET request for SSE streams
-        # Prepare query parameters
-        params = {}
-
-        # Add task information as query parameters
-        if task.task_id:
-            params["task_id"] = task.task_id
-
-        # Add input data as JSON string parameter
-        if input_data:
-            params["input"] = json.dumps(input_data, ensure_ascii=False)
-
-        # Add task description if available
-        if task.task_desc:
-            params["task"] = task.task_desc
+        """Execute SSE (Server-Sent Events) MCP service call using proper MCP protocol"""
 
         self.database.log_event(session_id, "executor", "sse_call_start",
                                f"Service: {service_config.service_name}, Task: {task.task_id}")
-        self.database.log_event(session_id, "executor", "sse_call_debug",
-                               f"GET URL: {service_config.endpoint_url}")
-        self.database.log_event(session_id, "executor", "sse_call_debug",
-                               f"Headers: {json.dumps(headers, ensure_ascii=False)}")
-        self.database.log_event(session_id, "executor", "sse_call_debug",
-                               f"Params: {json.dumps(params, ensure_ascii=False)}")
 
-        # Use a more flexible timeout configuration
-        timeout = aiohttp.ClientTimeout(
-            total=60,  # Increase to 60 seconds total
-            connect=15,  # 15 seconds to establish connection
-            sock_read=45  # 45 seconds for reading
-        )
+        # Step 1: Establish SSE connection to get endpoint and session_id
+        try:
+            headers = {
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive"
+            }
 
-        async with session.get(
-            service_config.endpoint_url,
-            params=params,
-            headers=headers,
-            timeout=timeout
-        ) as response:
-            self.database.log_event(session_id, "executor", "sse_call_debug", 
-                                   f"Response status: {response.status}")
-            self.database.log_event(session_id, "executor", "sse_call_debug", 
-                                   f"Response headers: {dict(response.headers)}")
-            
-            if response.status == 200:
-                # Check if response is SSE
+            timeout = aiohttp.ClientTimeout(total=15, connect=10, sock_read=5)
+
+            self.database.log_event(session_id, "executor", "sse_call_debug",
+                                   f"Step 1: Establishing SSE connection to {service_config.endpoint_url}")
+
+            async with session.get(
+                service_config.endpoint_url,
+                headers=headers,
+                timeout=timeout
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise Exception(f"SSE connection failed with status {response.status}: {error_text}")
+
                 content_type = response.headers.get('Content-Type', '')
-                self.database.log_event(session_id, "executor", "sse_call_debug", 
-                                       f"Content-Type: {content_type}")
-                
-                if 'text/event-stream' in content_type:
-                    # Handle SSE stream with timeout
+                if 'text/event-stream' not in content_type:
+                    # Try to handle as regular HTTP response
+                    response_text = await response.text()
                     self.database.log_event(session_id, "executor", "sse_call_debug",
-                                           f"Processing SSE stream...")
-                    events = []
-                    line_count = 0
-
+                                           f"Non-SSE response received: {response_text[:200]}...")
                     try:
-                        # Create a timeout task for reading
-                        async with asyncio.timeout(30):  # 30 second timeout for reading
-                            async for line in response.content:
-                                if line:
-                                    line_text = line.decode('utf-8').strip()
-                                    self.database.log_event(session_id, "executor", "sse_call_debug",
-                                                           f"Raw line {line_count}: {line_text[:100]}...")
-
-                                    # Handle both 'data:' and 'data: ' formats
-                                    if line_text.startswith('data:'):
-                                        if line_text.startswith('data: '):
-                                            event_data = line_text[6:]  # Remove 'data: ' prefix
-                                        else:
-                                            event_data = line_text[5:]  # Remove 'data:' prefix
-
-                                        if event_data:
-                                            self.database.log_event(session_id, "executor", "sse_call_debug",
-                                                                   f"Event {line_count}: {event_data[:100]}...")
-                                            line_count += 1
-
-                                            # Handle special SSE events
-                                            if event_data == '[DONE]':
-                                                self.database.log_event(session_id, "executor", "sse_call_debug",
-                                                                       f"Stream completed with [DONE] marker")
-                                                break
-
-                                            try:
-                                                # Try to parse as JSON
-                                                event_json = json.loads(event_data)
-                                                events.append(event_json)
-                                            except json.JSONDecodeError:
-                                                # Keep as text if not JSON
-                                                events.append(event_data)
-
-                                    # Stop after receiving some events to avoid hanging
-                                    if line_count >= 5:  # Limit to 5 events
-                                        self.database.log_event(session_id, "executor", "sse_call_debug",
-                                                               f"Stopping after 5 events to avoid hanging")
-                                        break
-
-                    except asyncio.TimeoutError:
-                        self.database.log_event(session_id, "executor", "sse_call_debug",
-                                               f"SSE read timeout after 30 seconds")
-
-                    self.database.log_event(session_id, "executor", "sse_call_debug",
-                                           f"Total events received: {len(events)}")
-
-                    if events:
-                        # Return the last event or all events
-                        result = events[-1] if len(events) == 1 else {"events": events}
+                        result = json.loads(response_text)
                         self.database.log_event(session_id, "executor", "sse_call_success",
                                                f"Service: {service_config.service_name}, Task: {task.task_id}")
                         return result
-                    else:
-                        self.database.log_event(session_id, "executor", "sse_call_debug",
-                                               f"No events received from SSE stream")
-                        # Instead of raising an exception, return a default response
-                        return {"status": "completed", "message": "SSE connection established but no events received"}
-                else:
-                    # Handle as regular response
+                    except json.JSONDecodeError:
+                        return response_text
+
+                # Parse SSE response to get endpoint and session_id
+                endpoint_info = None
+                line_count = 0
+
+                async with asyncio.timeout(10):
+                    async for line in response.content:
+                        if line:
+                            line_text = line.decode('utf-8').strip()
+                            line_count += 1
+
+                            self.database.log_event(session_id, "executor", "sse_call_debug",
+                                                   f"SSE line {line_count}: {line_text[:100]}...")
+
+                            # Look for endpoint event
+                            if line_text.startswith('data: '):
+                                event_data = line_text[6:]
+                                if event_data.startswith('/messages/?session_id='):
+                                    endpoint_info = event_data
+                                    break
+
+                            # Stop after reasonable number of lines
+                            if line_count >= 10:
+                                break
+
+                if not endpoint_info:
+                    raise Exception("No endpoint information received from SSE stream")
+
+                # Extract session_id from endpoint
+                session_id_part = endpoint_info.split('session_id=')[1] if 'session_id=' in endpoint_info else None
+                if not session_id_part:
+                    raise Exception("No session_id found in endpoint")
+
+                self.database.log_event(session_id, "executor", "sse_call_debug",
+                                       f"Received endpoint: {endpoint_info}, session_id: {session_id_part}")
+
+        except asyncio.TimeoutError:
+            raise Exception("SSE connection timeout")
+        except Exception as e:
+            raise Exception(f"Failed to establish SSE connection: {str(e)}")
+
+        # Step 2: Send actual request to the messages endpoint
+        try:
+            # Construct messages endpoint URL
+            base_url = service_config.endpoint_url.rstrip('/')
+            messages_url = f"{base_url}{endpoint_info}"
+
+            # Prepare request payload
+            payload = {
+                "input": {
+                    "task_id": task.task_id,
+                    "task_desc": task.task_desc,
+                    "expected_output": task.expected_output,
+                    "input_data": input_data
+                }
+            }
+
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+
+            timeout = aiohttp.ClientTimeout(total=45, connect=10, sock_read=35)
+
+            self.database.log_event(session_id, "executor", "sse_call_debug",
+                                   f"Step 2: Sending request to messages endpoint: {messages_url}")
+            self.database.log_event(session_id, "executor", "sse_call_debug",
+                                   f"Request payload: {json.dumps(payload, ensure_ascii=False)}")
+
+            async with session.post(
+                messages_url,
+                json=payload,
+                headers=headers,
+                timeout=timeout
+            ) as response:
+                self.database.log_event(session_id, "executor", "sse_call_debug",
+                                       f"Messages response status: {response.status}")
+
+                if response.status == 200:
                     response_text = await response.text()
-                    self.database.log_event(session_id, "executor", "sse_call_debug", 
-                                           f"Non-SSE response: {response_text[:500]}...")
+                    self.database.log_event(session_id, "executor", "sse_call_debug",
+                                           f"Messages response: {response_text[:500]}...")
+
                     try:
                         result = json.loads(response_text)
-                        self.database.log_event(session_id, "executor", "sse_call_success", 
+                        self.database.log_event(session_id, "executor", "sse_call_success",
                                                f"Service: {service_config.service_name}, Task: {task.task_id}")
                         return result
                     except json.JSONDecodeError as e:
-                        self.database.log_event(session_id, "executor", "sse_call_debug", 
+                        self.database.log_event(session_id, "executor", "sse_call_debug",
                                                f"JSON parse error: {str(e)}")
                         return response_text
-            else:
-                error_text = await response.text()
-                self.database.log_event(session_id, "executor", "sse_call_debug", 
-                                       f"Error response: {error_text}")
-                raise Exception(f"MCP SSE service returned status {response.status}: {error_text}")
+                else:
+                    error_text = await response.text()
+                    self.database.log_event(session_id, "executor", "sse_call_debug",
+                                           f"Messages error response: {error_text}")
+                    raise Exception(f"MCP messages endpoint returned status {response.status}: {error_text}")
+
+        except asyncio.TimeoutError:
+            raise Exception("Messages request timeout")
+        except Exception as e:
+            raise Exception(f"Failed to send messages request: {str(e)}")
     
     def _extract_service_name(self, task_desc: str) -> str:
         """Extract MCP service name from task description"""
