@@ -6,7 +6,7 @@ import sqlite3
 import json
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from .models import TaskSession, TaskGraph, ExecutionResults, SystemConfig
+from ..models import TaskSession, TaskGraph, ExecutionResults, SystemConfig
 
 
 class DatabaseManager:

@@ -6,8 +6,8 @@ import json
 from typing import Dict, List, Any, Optional
 from openai import OpenAI
 
-from .models import TaskGraph, ExecutionResults, TaskStatus
-from .database import DatabaseManager
+from ..models import TaskGraph, ExecutionResults, TaskStatus
+from ..services.database import DatabaseManager
 
 
 class OutputModel:

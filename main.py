@@ -11,7 +11,7 @@ from pathlib import Path
 # Add the project root to Python path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from mpeo.coordinator import CLIInterface
+from mpeo.core import CLIInterface
 from mpeo.models import SystemConfig
 
 
@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--timeout", type=int, help="MCP服务超时时间(秒)", default=30)
     parser.add_argument("--retries", type=int, help="任务重试次数", default=3)
     parser.add_argument("--model", help="OpenAI模型名称", default="gpt-3.5-turbo")
-    parser.add_argument("--db-path", help="数据库路径", default="mpeo.db")
+    parser.add_argument("--db-path", help="数据库路径", default="data/databases/mpeo.db")
     
     args = parser.parse_args()
     

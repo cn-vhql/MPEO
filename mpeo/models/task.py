@@ -1,5 +1,5 @@
 """
-Data models for the multi-model collaborative task processing system
+任务相关数据模型
 """
 
 from datetime import datetime
@@ -61,7 +61,7 @@ class TaskGraph(BaseModel):
     def validate_edge_references(cls, v, values):
         if 'nodes' not in values:
             return v
-        
+
         node_ids = {node.task_id for node in values['nodes']}
         for edge in v:
             if edge.from_task_id not in node_ids:
@@ -86,11 +86,11 @@ class TaskGraph(BaseModel):
         """Simple cycle detection without external dependencies"""
         visited = set()
         rec_stack = set()
-        
+
         def dfs(node_id):
             visited.add(node_id)
             rec_stack.add(node_id)
-            
+
             # Find all outgoing edges from this node
             for edge in self.edges:
                 if edge.from_task_id == node_id:
@@ -99,10 +99,10 @@ class TaskGraph(BaseModel):
                             return True
                     elif edge.to_task_id in rec_stack:
                         return True
-            
+
             rec_stack.remove(node_id)
             return False
-        
+
         for node in self.nodes:
             if node.task_id not in visited:
                 if dfs(node.task_id):
@@ -133,34 +133,3 @@ class ExecutionResults(BaseModel):
             self.success_count += 1
         elif result.status == TaskStatus.FAILED:
             self.failed_count += 1
-
-
-class SystemConfig(BaseModel):
-    """System configuration"""
-    max_parallel_tasks: int = Field(default=4, ge=1, description="Maximum parallel tasks")
-    mcp_service_timeout: int = Field(default=30, ge=1, description="MCP service timeout in seconds")
-    task_retry_count: int = Field(default=3, ge=0, description="Task retry count")
-    openai_model: str = Field(default="gpt-3.5-turbo", description="OpenAI model name")
-    database_path: str = Field(default="mpeo.db", description="SQLite database path")
-
-
-class TaskSession(BaseModel):
-    """Task processing session"""
-    session_id: str = Field(..., description="Unique session identifier")
-    user_query: str = Field(..., description="Original user query")
-    task_graph: Optional[TaskGraph] = Field(default=None, description="Generated task graph")
-    execution_results: Optional[ExecutionResults] = Field(default=None, description="Execution results")
-    final_output: Optional[str] = Field(default=None, description="Final output")
-    created_at: datetime = Field(default_factory=datetime.now)
-    updated_at: datetime = Field(default_factory=datetime.now)
-    status: str = Field(default="created", description="Session status")
-
-
-class MCPServiceConfig(BaseModel):
-    """MCP service configuration"""
-    service_name: str = Field(..., description="Service name")
-    service_type: str = Field(default="http", description="Service type (http, sse, websocket)")
-    endpoint_url: str = Field(..., description="Service endpoint URL")
-    timeout: int = Field(default=30, description="Request timeout")
-    headers: Optional[Dict[str, str]] = Field(default=None, description="Request headers")
-    auth_config: Optional[Dict[str, Any]] = Field(default=None, description="Authentication config")

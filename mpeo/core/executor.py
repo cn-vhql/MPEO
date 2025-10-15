@@ -11,11 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import aiohttp
 from openai import OpenAI
 
-from .models import (
+from ..models import (
     TaskGraph, TaskNode, TaskEdge, TaskType, TaskStatus, 
     ExecutionResult, ExecutionResults, SystemConfig, MCPServiceConfig
 )
-from .database import DatabaseManager
+from ..services.database import DatabaseManager
 
 
 class TaskExecutor:

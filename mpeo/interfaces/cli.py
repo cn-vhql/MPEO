@@ -12,8 +12,8 @@ from rich.prompt import Prompt, Confirm
 from rich.text import Text
 from rich.tree import Tree
 
-from .models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType, TaskSession
-from .database import DatabaseManager
+from ..models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType, TaskSession
+from ..services.database import DatabaseManager
 
 
 class HumanFeedbackInterface:

@@ -11,12 +11,12 @@ from typing import Optional, Dict, Any
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from .models import TaskSession, TaskGraph, ExecutionResults, SystemConfig, MCPServiceConfig
-from .database import DatabaseManager
+from ..models import TaskSession, TaskGraph, ExecutionResults, SystemConfig, MCPServiceConfig
+from ..services import DatabaseManager
 from .planner import PlannerModel
 from .executor import TaskExecutor
 from .output import OutputModel
-from .interface import HumanFeedbackInterface
+from ..interfaces import HumanFeedbackInterface
 
 
 class SystemCoordinator:
@@ -24,40 +24,9 @@ class SystemCoordinator:
     
     def _setup_logging(self):
         """Setup logging system with file and console output"""
-        # Create logs directory if it doesn't exist
-        logs_dir = "logs"
-        if not os.path.exists(logs_dir):
-            os.makedirs(logs_dir)
-        
-        # Generate log filename with current date
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        log_filename = os.path.join(logs_dir, f"{current_date}.log")
-        
-        # Configure logging format
-        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        formatter = logging.Formatter(log_format)
-        
-        # Setup root logger
-        logger = logging.getLogger()
-        logger.setLevel(logging.DEBUG)
-        
-        # Clear existing handlers
-        logger.handlers.clear()
-        
-        # File handler (for all levels)
-        file_handler = logging.FileHandler(log_filename, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        # Console handler (for INFO and above)
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-        
-        # Log that logging system is initialized
-        logging.info(f"Logging system initialized. Log file: {log_filename}")
+        # Use the centralized logging utility
+        from ..utils.logging import setup_logging
+        setup_logging(log_dir="data/logs")
     
     def __init__(self, config: Optional[SystemConfig] = None):
         # Load environment variables, overriding existing ones
@@ -131,8 +100,8 @@ class SystemCoordinator:
             import json
             import os
             
-            # Look for mcp_config.json in the project root
-            config_file_path = "mcp_config.json"
+            # Look for mcp_services.json in the config directory
+            config_file_path = "config/mcp_services.json"
             if os.path.exists(config_file_path):
                 with open(config_file_path, 'r', encoding='utf-8') as f:
                     config_data = json.load(f)
@@ -159,7 +128,7 @@ class SystemCoordinator:
                 
                 logging.info(f"MCP services loaded from config file: {config_file_path}")
             else:
-                logging.info("No mcp_config.json file found, skipping MCP service loading from config")
+                logging.info("No config/mcp_services.json file found, skipping MCP service loading from config")
                 
         except Exception as e:
             logging.error(f"Failed to load MCP services from config file: {str(e)}")

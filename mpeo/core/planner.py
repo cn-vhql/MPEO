@@ -6,8 +6,8 @@ import json
 import uuid
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
-from .models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType
-from .database import DatabaseManager
+from ..models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType
+from ..services.database import DatabaseManager
 
 
 class PlannerModel:
