@@ -12,7 +12,9 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from ..models import TaskSession, TaskGraph, ExecutionResults, SystemConfig, MCPServiceConfig
+from ..models.agent_config import MultiAgentConfig, OpenAIApiConfig
 from ..services import DatabaseManager
+from ..utils.config import load_agent_config
 from .planner import PlannerModel
 from .executor import TaskExecutor
 from .output import OutputModel
@@ -28,60 +30,119 @@ class SystemCoordinator:
         from ..utils.logging import setup_logging
         setup_logging(log_dir="data/logs")
     
-    def __init__(self, config: Optional[SystemConfig] = None):
+    def __init__(self, config: Optional[SystemConfig] = None,
+                 agent_config: Optional[MultiAgentConfig] = None,
+                 agent_config_path: Optional[str] = None):
         # Load environment variables, overriding existing ones
         load_dotenv(override=True)
-        
+
         # Setup logging system
         self._setup_logging()
-        
+
         # Initialize configuration
         self.config = config or SystemConfig()
-        
+
+        # Load agent configuration
+        if agent_config:
+            self.agent_config = agent_config
+        elif agent_config_path:
+            self.agent_config = load_agent_config(agent_config_path)
+        else:
+            # Try to load from default path, otherwise use default config
+            self.agent_config = load_agent_config()
+
         # Always read OPENAI_MODEL from environment and override if present
         openai_model = os.getenv("OPENAI_MODEL")
         if openai_model:
             self.config.openai_model = openai_model
             logging.debug(f"Overriding model from environment: {openai_model}")
-        
-        # Initialize OpenAI client
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is required")
-        
-        # Get custom API base URL if provided
-        openai_api_base = os.getenv("OPENAI_API_BASE")
-        
-        # Log initialization details
-        logging.debug(f"OpenAI API Key: {'***' + openai_api_key[-10:] if openai_api_key else 'None'}")
-        logging.debug(f"OpenAI API Base: {openai_api_base or 'Default (https://api.openai.com/v1)'}")
-        logging.debug(f"OpenAI Model: {self.config.openai_model}")
-        
-        # Initialize OpenAI client with custom base URL if provided
-        try:
-            if openai_api_base:
-                self.openai_client = OpenAI(api_key=openai_api_key, base_url=openai_api_base)
-            else:
-                self.openai_client = OpenAI(api_key=openai_api_key)
-            logging.debug("OpenAI client initialized successfully")
-        except Exception as e:
-            logging.error(f"Failed to initialize OpenAI client: {str(e)}")
-            raise
-        
+
+        # Initialize OpenAI clients for each agent
+        self.openai_clients = self._initialize_openai_clients()
+
         # Initialize database
         self.database = DatabaseManager(self.config.database_path)
-        
-        # Initialize components
-        self.planner = PlannerModel(self.openai_client, self.database, self.config.openai_model)
-        self.executor = TaskExecutor(self.openai_client, self.database, self.config)
-        self.output_model = OutputModel(self.openai_client, self.database, self.config.openai_model)
+
+        # Initialize components with individual model configurations and clients
+        self.planner = PlannerModel(
+            self.openai_clients['planner'],
+            self.database,
+            self.agent_config.planner
+        )
+        self.executor = TaskExecutor(
+            self.openai_clients['executor'],
+            self.database,
+            self.config,
+            self.agent_config.executor
+        )
+        self.output_model = OutputModel(
+            self.openai_clients['output'],
+            self.database,
+            self.agent_config.output
+        )
         self.interface = HumanFeedbackInterface(self.database)
-        
+
         # Load configuration from database
         self._load_configuration()
-        
+
         # Update planner with available MCP services
         self._update_planner_mcp_services()
+
+    def _initialize_openai_clients(self) -> Dict[str, OpenAI]:
+        """为每个智能体初始化独立的OpenAI客户端"""
+        clients = {}
+
+        for agent_name in ['planner', 'executor', 'output']:
+            agent_config = getattr(self.agent_config, agent_name)
+
+            # 获取OpenAI配置
+            openai_config = agent_config.openai_config or OpenAIApiConfig()
+
+            # 如果没有配置API密钥，尝试从环境变量获取
+            if not openai_config.api_key:
+                global_api_key = os.getenv("OPENAI_API_KEY")
+                if not global_api_key:
+                    raise ValueError(f"OPENAI_API_KEY environment variable is required for {agent_name}")
+                openai_config.api_key = global_api_key
+
+            # 获取基础URL
+            if not openai_config.base_url:
+                global_base_url = os.getenv("OPENAI_API_BASE")
+                if global_base_url:
+                    openai_config.base_url = global_base_url
+
+            # 获取组织ID
+            if not openai_config.organization:
+                global_organization = os.getenv("OPENAI_ORGANIZATION")
+                if global_organization:
+                    openai_config.organization = global_organization
+
+            # 创建客户端
+            try:
+                client_kwargs = {
+                    'api_key': openai_config.api_key,
+                    'timeout': openai_config.timeout or 60,
+                    'max_retries': openai_config.max_retries or 3
+                }
+
+                if openai_config.base_url:
+                    client_kwargs['base_url'] = openai_config.base_url
+
+                if openai_config.organization:
+                    client_kwargs['organization'] = openai_config.organization
+
+                client = OpenAI(**client_kwargs)
+                clients[agent_name] = client
+
+                logging.debug(f"{agent_name} OpenAI client initialized successfully")
+                logging.debug(f"  Base URL: {openai_config.base_url or 'Default'}")
+                logging.debug(f"  Model: {agent_config.model_name}")
+
+            except Exception as e:
+                logging.error(f"Failed to initialize {agent_name} OpenAI client: {str(e)}")
+                raise
+
+        return clients
     
     def _load_configuration(self):
         """Load system configuration from database and config files"""

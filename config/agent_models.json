@@ -1,0 +1,74 @@
+{
+  "planner": {
+    "model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "temperature": 0.3,
+    "max_tokens": 2000,
+    "timeout": 60,
+    "retry_count": 3,
+    "system_prompt": "你是一个专业的任务规划专家，擅长将复杂需求分解为结构化的任务图，并进行合理的任务调度和依赖分析。请用中文回复，输出格式为JSON。",
+    "response_format": {
+      "type": "json_object"
+    },
+    "openai_config": {
+      "api_key": "your-modelscope-api-key-here",
+      "base_url": "https://api-inference.modelscope.cn/v1",
+      "timeout": 60,
+      "max_retries": 3,
+      "custom_headers": {
+        "User-Agent": "MPEO-Planner/1.0"
+      }
+    }
+  },
+  "executor": {
+    "model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "temperature": 0.2,
+    "max_tokens": 1500,
+    "timeout": 30,
+    "retry_count": 2,
+    "system_prompt": "你是一个高效的任务执行专家，能够准确执行各种计算任务、数据处理任务和MCP服务调用。请用中文回复。",
+    "openai_config": {
+      "api_key": "your-modelscope-api-key-here",
+      "base_url": "https://api-inference.modelscope.cn/v1",
+      "timeout": 30,
+      "max_retries": 2,
+      "custom_headers": {
+        "User-Agent": "MPEO-Executor/1.0"
+      }
+    }
+  },
+  "output": {
+    "model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "temperature": 0.4,
+    "max_tokens": 3000,
+    "timeout": 45,
+    "retry_count": 2,
+    "system_prompt": "你是一个专业的内容整合专家，擅长将多个任务的执行结果整合为完整、准确、结构清晰的最终答案。请用中文回复。",
+    "response_format": {
+      "type": "text"
+    },
+    "openai_config": {
+      "api_key": "your-modelscope-api-key-here",
+      "base_url": "https://api-inference.modelscope.cn/v1",
+      "timeout": 45,
+      "max_retries": 2,
+      "custom_headers": {
+        "User-Agent": "MPEO-Output/1.0"
+      }
+    }
+  },
+  "global_openai_config": {
+    "api_key": "your-modelscope-api-key-here",
+    "base_url": "https://api-inference.modelscope.cn/v1",
+    "timeout": 60,
+    "max_retries": 3
+  },
+  "global_model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+  "global_timeout": 60,
+  "global_retry_count": 3,
+  "enable_model_caching": true,
+  "enable_parallel_execution": true,
+  "max_concurrent_requests": 5,
+  "daily_token_limit": 100000,
+  "cost_alert_threshold": 10.0,
+  "model_selection_strategy": "quality"
+}

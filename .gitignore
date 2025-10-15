@@ -27,6 +27,7 @@ share/python-wheels/
 MANIFEST
 CLAUDE.md
 mcp_services.json
+tests/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

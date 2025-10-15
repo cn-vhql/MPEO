@@ -30,6 +30,7 @@
 ### 技术特点
 
 - 🤖 **AI驱动**: 使用OpenAI GPT模型进行智能任务分解和结果整合
+- 🎯 **智能体独立配置**: 支持为规划、执行、输出智能体配置不同的大模型
 - 🔄 **异步执行**: 支持多任务并行处理，提高执行效率
 - 💾 **数据持久化**: 使用SQLite存储会话历史和执行结果
 - 🎛️ **可配置**: 支持灵活的系统配置和MCP服务注册
@@ -62,9 +63,21 @@ cp .env.example .env
 # 编辑 .env 文件，添加你的 OpenAI API Key
 ```
 
-4. **验证安装**
+4. **配置智能体模型（推荐）**
+```bash
+# 复制智能体配置模板
+cp config/agent_models.example.json config/agent_models.json
+
+# 根据需要编辑配置文件
+# 可以为规划、执行、输出智能体设置不同的模型
+```
+
+5. **验证安装**
 ```bash
 python main.py --help
+
+# 运行智能体配置演示
+python scripts/demo_agent_configs.py
 ```
 
 ## 🎯 使用方法
@@ -76,6 +89,25 @@ python main.py --help
 python main.py
 ```
 
+### 智能体模型配置
+
+系统支持为不同智能体配置独立的大模型：
+
+```bash
+# 查看可用预设配置
+python -c "
+from mpeo.utils.config import list_available_presets
+presets = list_available_presets()
+for name, desc in presets.items():
+    print(f'{name}: {desc}')
+"
+
+# 使用预设配置
+python main.py --agent-preset high_quality  # 高质量配置
+python main.py --agent-preset speed_optimized  # 速度优化配置
+python main.py --agent-preset cost_optimized  # 成本优化配置
+```
+
 ### 命令行参数
 
 ```bash
@@ -83,11 +115,35 @@ python main.py [选项]
 
 选项:
   --config CONFIG       配置文件路径
+  --agent-config CONFIG 智能体模型配置文件路径
+  --agent-preset PRESET 使用预设智能体配置
   --max-parallel MAX    最大并行任务数 (默认: 4)
   --timeout TIMEOUT     MCP服务超时时间(秒) (默认: 30)
   --retries RETRIES     任务重试次数 (默认: 3)
   --model MODEL         OpenAI模型名称 (默认: gpt-3.5-turbo)
   --db-path DB_PATH     数据库路径 (默认: mpeo.db)
+```
+
+### 智能体配置示例
+
+```json
+{
+  "planner": {
+    "model_name": "gpt-4",
+    "temperature": 0.3,
+    "system_prompt": "你是一个专业的任务规划专家..."
+  },
+  "executor": {
+    "model_name": "gpt-3.5-turbo",
+    "temperature": 0.2,
+    "system_prompt": "你是一个高效的任务执行专家..."
+  },
+  "output": {
+    "model_name": "gpt-4",
+    "temperature": 0.4,
+    "system_prompt": "你是一个专业的内容整合专家..."
+  }
+}
 ```
 
 ### 交互式命令
@@ -336,6 +392,11 @@ logs <session_id>
 
 本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
 
+## 📚 相关文档
+
+- [智能体配置指南](config/AGENT_MODELS.md) - 详细的智能体模型配置说明
+- [MCP服务配置指南](config/README.md) - MCP服务集成和配置说明
+
 ## 📞 支持
 
 如果您遇到问题或有建议，请：
@@ -345,6 +406,14 @@ logs <session_id>
 3. 创建新的 Issue 描述您的问题
 
 ## 🔄 更新日志
+
+### v0.2.0 (2024-10-15)
+- ✨ **新功能**: 智能体独立模型配置支持
+- 🎯 支持为规划、执行、输出智能体配置不同的大模型
+- 📋 提供多种预设配置（高质量、平衡、速度优化、成本优化等）
+- 🔧 新增智能体配置加载和管理功能
+- 📝 完善的配置文档和使用示例
+- 🧪 新增智能体配置演示脚本
 
 ### v0.1.0 (2024-10-14)
 - 初始版本发布
