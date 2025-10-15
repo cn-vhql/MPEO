@@ -390,33 +390,43 @@ class TaskExecutor:
                               task: TaskNode, input_data: Dict[str, Any], session_id: str) -> Any:
         """Execute SSE (Server-Sent Events) MCP service call"""
         
-        # Prepare request payload for POST request
-        payload = {
-            "task_id": task.task_id,
-            "input_data": input_data,
-            "timeout": service_config.timeout
-        }
-        
         # Prepare headers for SSE
         headers = service_config.headers or {}
         headers.setdefault("Accept", "text/event-stream")
         headers.setdefault("Cache-Control", "no-cache")
-        headers.setdefault("Content-Type", "application/json")
+        
+        # For SSE, we typically use GET request with parameters in URL
+        # Prepare request parameters
+        params = {
+            "task_id": task.task_id,
+            "timeout": service_config.timeout
+        }
+        
+        # Add input data as JSON string parameter
+        if input_data:
+            params["input_data"] = json.dumps(input_data, ensure_ascii=False)
         
         self.database.log_event(session_id, "executor", "sse_call_start", 
                                f"Service: {service_config.service_name}, Task: {task.task_id}")
         self.database.log_event(session_id, "executor", "sse_call_debug", 
-                               f"POST URL: {service_config.endpoint_url}")
+                               f"GET URL: {service_config.endpoint_url}")
         self.database.log_event(session_id, "executor", "sse_call_debug", 
                                f"Headers: {json.dumps(headers, ensure_ascii=False)}")
         self.database.log_event(session_id, "executor", "sse_call_debug", 
-                               f"Payload: {json.dumps(payload, ensure_ascii=False)}")
+                               f"Params: {json.dumps(params, ensure_ascii=False)}")
         
-        async with session.post(
+        # Use a more flexible timeout configuration
+        timeout = aiohttp.ClientTimeout(
+            total=service_config.timeout,
+            connect=10,  # 10 seconds to establish connection
+            sock_read=service_config.timeout - 10  # Remaining time for reading
+        )
+        
+        async with session.get(
             service_config.endpoint_url,
-            json=payload,
+            params=params,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=service_config.timeout)
+            timeout=timeout
         ) as response:
             self.database.log_event(session_id, "executor", "sse_call_debug", 
                                    f"Response status: {response.status}")
