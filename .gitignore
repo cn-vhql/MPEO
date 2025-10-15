@@ -29,6 +29,7 @@ CLAUDE.md
 mcp_services.json
 tests/
 mcp_chatbot-master
+mcp_demo
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
