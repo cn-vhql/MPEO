@@ -49,17 +49,10 @@ class PlannerModel:
             if not force_refresh and hasattr(self, '_tools_cache_timestamp'):
                 # 缓存5分钟，避免频繁调用
                 if time.time() - self._tools_cache_timestamp < 300:
-                    print(f"[DEBUG] Planner - Using cached MCP tools (cached {len(self.available_mcp_tools)} services)")
                     return
 
             self.available_mcp_tools = await self.mcp_manager.get_available_tools()
             self._tools_cache_timestamp = time.time()
-
-            print(f"[DEBUG] Planner - Updated MCP tools from {len(self.available_mcp_tools)} services")
-            for service_name, tools in self.available_mcp_tools.items():
-                print(f"[DEBUG] Planner - Service {service_name}: {len(tools)} tools")
-                for tool in tools:
-                    print(f"[DEBUG] Planner -   - {tool.name}: {tool.description}")
         except Exception as e:
             print(f"[ERROR] Planner - Failed to refresh MCP tools: {str(e)}")
             # 保留现有缓存，不置空
@@ -70,7 +63,6 @@ class PlannerModel:
         """使工具缓存失效，强制下次刷新"""
         if hasattr(self, '_tools_cache_timestamp'):
             delattr(self, '_tools_cache_timestamp')
-        print("[DEBUG] Planner - Tools cache invalidated")
 
     def get_tools_summary(self) -> str:
         """获取MCP工具的摘要信息，用于prompt"""

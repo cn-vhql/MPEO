@@ -23,26 +23,49 @@ class HumanFeedbackInterface:
         self.database = database
         self.console = Console()
     
-    def present_task_graph(self, task_graph: TaskGraph, user_query: str, session_id: str) -> Tuple[bool, Optional[TaskGraph]]:
+    def present_task_graph(self, task_graph: TaskGraph, user_query: str, session_id: str, mcp_manager=None) -> Tuple[bool, Optional[TaskGraph]]:
         """
         Present task graph to user for confirmation or modification
-        
+
         Args:
             task_graph: Generated task graph
             user_query: Original user query
             session_id: Session identifier
-            
+            mcp_manager: Optional MCP manager for displaying tool information
+
         Returns:
             Tuple[bool, Optional[TaskGraph]]: (confirmed, modified_task_graph)
         """
         self.database.log_event(session_id, "interface", "dag_presentation", "Presenting DAG to user")
         
         while True:
+            # Build MCP tools info
+            mcp_tools_info = ""
+            if mcp_manager:
+                try:
+                    # 获取MCP工具信息
+                    mcp_tools = mcp_manager.get_available_tools()
+                    if mcp_tools:
+                        mcp_tools_info = "\n[bold cyan]可用MCP工具：[/bold cyan]\n"
+                        total_tools = 0
+                        for service_name, tools in mcp_tools.items():
+                            if tools:
+                                total_tools += len(tools)
+                                mcp_tools_info += f"  • {service_name}: {len(tools)}个工具\n"
+                        mcp_tools_info += f"  [dim]共{total_tools}个工具已加载[/dim]"
+                    else:
+                        mcp_tools_info = "\n[dim]暂无可用MCP工具[/dim]"
+                except Exception:
+                    mcp_tools_info = "\n[dim]MCP工具信息获取失败[/dim]"
+            else:
+                mcp_tools_info = "\n[dim]MCP管理器未初始化[/dim]"
+
             # Display header
             self.console.print(Panel.fit(
                 f"[bold blue]多模型协作任务处理系统[/bold blue]\n"
                 f"[green]任务图确认环节[/green]\n\n"
-                f"原始问题：{user_query}",
+                f"原始问题：{user_query}"
+                f"{mcp_tools_info}",
                 title="系统提示"
             ))
             
@@ -457,26 +480,32 @@ class HumanFeedbackInterface:
         table.add_column("任务ID", style="cyan", width=8)
         table.add_column("状态", style="white", width=10)
         table.add_column("执行时间", style="green", width=10)
-        table.add_column("输出/错误", style="yellow", width=40)
-        
+        table.add_column("输出/错误", style="yellow", width=50, no_wrap=False)
+
         for result in execution_results.execution_results:
             status_text = "✓ 成功" if result.status.value == "成功" else "✗ 失败"
             status_style = "green" if result.status.value == "成功" else "red"
-            
-            # 确保输出是字符串格式
+
+            # 确保输出是字符串格式，并处理换行
             output_raw = result.output or result.error_msg or "无输出"
             if isinstance(output_raw, dict):
-                # 如果是字典，转换为字符串
-                output_text = str(output_raw)
+                # 如果是字典，转换为格式化的字符串
+                output_text = json.dumps(output_raw, ensure_ascii=False, indent=2)
             elif isinstance(output_raw, list):
-                # 如果是列表，转换为字符串
-                output_text = str(output_raw)
+                # 如果是列表，转换为格式化的字符串
+                output_text = json.dumps(output_raw, ensure_ascii=False, indent=2)
             else:
                 output_text = str(output_raw)
 
-            if len(output_text) > 37:
-                output_text = output_text[:37] + "..."
-            
+            # 清理输出文本，移除多余的空白和换行
+            output_text = output_text.strip()
+            # 替换换行符为空格，让Rich处理文本换行
+            output_text = ' '.join(output_text.split())
+
+            # 如果输出太长，截断并添加省略号
+            if len(output_text) > 200:
+                output_text = output_text[:200] + "..."
+
             table.add_row(
                 result.task_id,
                 f"[{status_style}]{status_text}[/{status_style}]",

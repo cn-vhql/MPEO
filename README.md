@@ -29,7 +29,7 @@
 
 ### 技术特点
 
-- 🤖 **AI驱动**: 使用OpenAI GPT模型进行智能任务分解和结果整合
+- 🤖 **AI驱动**: 使用大语言模型进行智能任务分解和结果整合
 - 🔄 **异步执行**: 支持多任务并行处理，提高执行效率
 - 💾 **数据持久化**: 使用SQLite存储会话历史和执行结果
 - 🎛️ **可配置**: 支持灵活的系统配置和MCP服务注册
@@ -42,7 +42,7 @@
 ### 环境要求
 
 - Python 3.11+
-- OpenAI API Key
+- 支持OpenAI兼容API的密钥
 
 ### 安装步骤
 
@@ -55,12 +55,14 @@ cd MPEO
 2. **安装依赖**
 ```bash
 pip install -e .
+# 或者使用 uv (如果可用)
+uv pip install -e .
 ```
 
 3. **配置环境变量**
 ```bash
 cp .env.example .env
-# 编辑 .env 文件，添加你的 OpenAI API Key
+# 编辑 .env 文件，添加你的 API 密钥
 ```
 
 4. **验证安装**
@@ -87,7 +89,7 @@ python main.py [选项]
   --max-parallel MAX    最大并行任务数 (默认: 4)
   --timeout TIMEOUT     MCP服务超时时间(秒) (默认: 30)
   --retries RETRIES     任务重试次数 (默认: 3)
-  --model MODEL         OpenAI模型名称 (默认: gpt-3.5-turbo)
+  --model MODEL         大模型名称 (默认: gpt-3.5-turbo)
   --db-path DB_PATH     数据库路径 (默认: data/databases/mpeo.db)
 ```
 
@@ -119,6 +121,11 @@ python main.py [选项]
 3. **复杂数据处理**
 ```
 请帮我分析最近一个月的销售数据，生成包括趋势分析、异常检测和预测报告的完整分析结果
+```
+
+4. **趋势分析**
+```
+请分析当前最热门的编程语言和框架趋势
 ```
 
 ## 🏗️ 系统架构
@@ -157,11 +164,16 @@ python main.py [选项]
    - 获取编程库的最新文档
    - 支持代码示例和API参考
 
-3. **Time-MCP** - 时间处理工具
+3. **time-mcp** - 时间处理工具
    - 当前时间查询
    - 时区转换
    - 时间戳处理
    - 日期计算
+
+4. **trends-hub** - 趋势分析工具
+   - GitHub趋势分析
+   - 技术流行度分析
+   - 开源项目热度追踪
 
 ### MCP服务配置
 
@@ -171,22 +183,28 @@ MCP服务配置位于 `config/mcp_services.json`：
 {
   "mcpServices": {
     "fetch": {
-      "type": "jsonrpc",
+      "type": "streamable_http",
       "url": "https://mcp.api-inference.modelscope.net/9ccb10acb11f4d/mcp",
       "timeout": 30,
       "description": "网页抓取工具 - 获取URL内容并转换为markdown格式"
     },
     "context7-mcp": {
-      "type": "jsonrpc",
+      "type": "streamable_http",
       "url": "https://mcp.api-inference.modelscope.net/d49e76846b6647/mcp",
       "timeout": 30,
       "description": "Context7文档查询工具 - 获取编程库的最新文档"
     },
-    "Time-MCP": {
-      "type": "jsonrpc",
-      "url": "https://mcp.api-inference.modelscope.net/f0e7d9f896f64f/mcp",
+    "time-mcp": {
+      "type": "streamable_http",
+      "url": "https://mcp.api-inference.modelscope.net/0edb46e720b744/mcp",
       "timeout": 30,
       "description": "时间处理工具 - 当前时间、时区转换、时间戳等功能"
+    },
+    "trends-hub": {
+      "type": "command",
+      "command": "npx",
+      "args": ["-y", "mcp-trends-hub@1.6.2"],
+      "description": "趋势分析工具 - GitHub趋势、技术流行度分析等功能"
     }
   }
 }
@@ -234,12 +252,38 @@ mcp register custom_service http://localhost:8080/mcp
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| OPENAI_API_KEY | OpenAI API密钥 | 必填 |
-| OPENAI_MODEL | OpenAI模型名称 | gpt-3.5-turbo |
+| OPENAI_API_KEY | 大模型API密钥 | 必填 |
+| OPENAI_BASE_URL | 大模型API端点 | https://api.openai.com/v1 |
+| OPENAI_MODEL | 大模型名称 | gpt-3.5-turbo |
 | MAX_PARALLEL_TASKS | 最大并行任务数 | 4 |
 | MCP_SERVICE_TIMEOUT | MCP服务超时时间(秒) | 30 |
 | TASK_RETRY_COUNT | 任务重试次数 | 3 |
 | DATABASE_PATH | 数据库路径 | data/databases/mpeo.db |
+
+### 智能体独立配置
+
+支持为不同的智能体配置不同的模型和参数：
+
+```json
+{
+  "planner": {
+    "model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "temperature": 0.3,
+    "openai_config": {
+      "api_key": "your-planner-api-key",
+      "base_url": "https://api-inference.modelscope.cn/v1"
+    }
+  },
+  "executor": {
+    "model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "temperature": 0.2,
+    "openai_config": {
+      "api_key": "your-executor-api-key",
+      "base_url": "https://api-inference.modelscope.cn/v1"
+    }
+  }
+}
+```
 
 ### 系统配置
 
@@ -299,14 +343,54 @@ CREATE TABLE logs (
 );
 ```
 
+## 🚀 快速开始
+
+### 1. 基础配置
+
+确保你的环境变量中有正确的API配置：
+
+```bash
+export OPENAI_API_KEY=your-api-key
+export OPENAI_BASE_URL=your-api-endpoint
+```
+
+### 2. 启动系统
+
+```bash
+python main.py
+```
+
+### 3. 简单测试
+
+在交互界面中输入：
+
+```
+当前时间是什么？
+```
+
+系统将：
+1. 分析你的需求
+2. 生成任务图（时间查询任务）
+3. 等待你确认
+4. 执行时间查询
+5. 返回结果
+
+### 4. 复杂任务示例
+
+```
+请帮我分析当前最热门的三个AI编程工具，并获取每个工具的官方文档信息
+```
+
+这将演示系统的多任务协作能力。
+
 ## 🐛 故障排除
 
 ### 常见问题
 
-1. **OpenAI API错误**
-   - 检查API密钥是否正确设置
-   - 确认API配额是否充足
-   - 检查网络连接
+1. **API认证错误 (401)**
+   - 检查环境变量中的API密钥是否正确
+   - 确认API密钥是否有效且未过期
+   - 验证API端点URL是否正确
 
 2. **MCP服务连接失败**
    - 检查网络连接和服务可用性
@@ -335,13 +419,14 @@ logs <session_id>
 
 日志文件位置：`data/logs/YYYY-MM-DD.log`
 
-## 🤝 贡献指南
+### 环境检查
 
-1. Fork 项目
-2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 打开 Pull Request
+检查系统状态：
+
+```bash
+# 在交互界面中执行
+status
+```
 
 ## 📄 许可证
 
@@ -359,33 +444,6 @@ logs <session_id>
 1. 查看本文档的故障排除部分
 2. 检查项目的 Issues 页面
 3. 创建新的 Issue 描述您的问题
+4. 作者联系方式
+   - 邮箱：[yl_zhangqiang@foxmail.com](mailto:yl_zhangqiang@foxmail.com)
 
-## 🔄 更新日志
-
-### v1.0.0 (2025-10-16)
-- ✨ **新功能**: 完整的MCP服务集成支持
-- 🔧 集成官方MCP SDK (mcp==1.17.0)
-- 🎯 优化的MCP服务管理器，支持多种连接方式
-- 📋 预配置三个核心MCP服务（fetch、context7-mcp、Time-MCP）
-- 🛠️ 改进的任务执行结果格式化
-- 🧹 项目代码清理，移除冗余和测试代码
-- 🔍 增强的错误处理和日志记录
-- 📊 优化的数据验证和类型安全
-
-### v0.2.0 (2024-10-15)
-- ✨ **新功能**: 智能体独立模型配置支持
-- 🎯 支持为规划、执行、输出智能体配置不同的大模型
-- 📋 提供多种预设配置（高质量、平衡、速度优化、成本优化等）
-- 🔧 新增智能体配置加载和管理功能
-- 📝 完善的配置文档和使用示例
-
-### v0.1.0 (2024-10-14)
-- 初始版本发布
-- 实现基本的多模型协作功能
-- 支持任务图生成和人工确认
-- 集成OpenAI API和MCP服务调用
-- 提供完整的命令行界面
-
----
-
-**多模型协作任务处理系统** - 让AI协作更智能、更可控！

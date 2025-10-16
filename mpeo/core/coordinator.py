@@ -263,7 +263,7 @@ class SystemCoordinator:
             
             # Step 2: Human Feedback Phase
             self.database.log_event(session_id, "coordinator", "feedback_phase_started")
-            confirmed, final_graph = self._feedback_phase(task_graph, user_query, session_id)
+            confirmed, final_graph = await self._feedback_phase(task_graph, user_query, session_id)
             if not confirmed:
                 session.status = "cancelled"
                 self.database.save_session(session)
@@ -292,9 +292,6 @@ class SystemCoordinator:
             
             # Display execution results
             self.interface.display_execution_results(execution_results, session_id)
-            
-            # Display final output
-            self._display_final_output(final_output)
             
             self.database.log_event(session_id, "coordinator", "session_completed", "All phases completed successfully")
             
@@ -338,11 +335,11 @@ class SystemCoordinator:
             self.database.log_event(session_id, "coordinator", "planning_error", f"Planning failed: {str(e)}")
             return None
     
-    def _feedback_phase(self, task_graph: TaskGraph, user_query: str, session_id: str) -> tuple[bool, Optional[TaskGraph]]:
+    async def _feedback_phase(self, task_graph: TaskGraph, user_query: str, session_id: str) -> tuple[bool, Optional[TaskGraph]]:
         """Execute the human feedback phase"""
         try:
             # Present task graph to user for confirmation/modification
-            confirmed, modified_graph = self.interface.present_task_graph(task_graph, user_query, session_id)
+            confirmed, modified_graph = self.interface.present_task_graph(task_graph, user_query, session_id, self.mcp_manager)
             
             if confirmed and modified_graph:
                 # Save modified task graph
