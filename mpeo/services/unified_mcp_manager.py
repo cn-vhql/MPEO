@@ -267,12 +267,15 @@ class StdioClient(MCPClientBase):
             raise ValueError("Command must be a valid string")
 
         try:
-            # 创建STDIO客户端
-            self._client = stdio_client({
+            # 创建STDIO客户端配置
+            stdio_config = {
                 "command": command,
                 "args": self.config.args,
                 "env": {**os.environ, **self.config.env} if self.config.env else None,
-            })
+            }
+            self.logger.debug(f"STDIO client config: {stdio_config}")
+
+            self._client = stdio_client(stdio_config)
 
             # 进入上下文
             context = await self.stack.enter_async_context(self._client)
@@ -617,7 +620,11 @@ class UnifiedMCPManager:
     async def _load_services_from_config(self) -> None:
         """从配置文件加载MCP服务"""
         try:
-            config_path = "/vda1/data/MPEO/config/mcp_services.json"
+            # 直接使用项目根目录下的配置文件
+            import os
+            from pathlib import Path
+            base_dir = Path(__file__).parent.parent.parent
+            config_path = base_dir / "config" / "mcp_services.json"
             if os.path.exists(config_path):
                 self.logger.info(f"Loading MCP services from {config_path}")
 
@@ -628,27 +635,48 @@ class UnifiedMCPManager:
                     services = config_data["mcpServices"]
                     self.logger.info(f"Found {len(services)} MCP services in config")
 
+                    loaded_count = 0
                     for service_name, service_config in services.items():
                         try:
-                            mcp_service_config = MCPServiceConfig(
-                                service_name=service_name,
-                                service_type=service_config.get("type", "http"),
-                                endpoint_url=service_config.get("url", ""),
-                                timeout=service_config.get("timeout", 30),
-                                headers=service_config.get("headers", {})
-                            )
-
-                            success = await self.register_service(mcp_service_config)
+                            # 检查配置类型
+                            if service_config.get("type") == "command":
+                                # 命令行类型服务 - 直接创建连接配置
+                                connection_config = MCPConnectionConfig(
+                                    name=service_name,
+                                    service_type="stdio",
+                                    command=service_config.get("command"),
+                                    args=service_config.get("args", []),
+                                    timeout=service_config.get("timeout", 30)
+                                )
+                                success = await self._register_service_with_config(connection_config)
+                            else:
+                                # HTTP类型服务 - 使用MCPServiceConfig
+                                mcp_service_config = MCPServiceConfig(
+                                    service_name=service_name,
+                                    service_type=service_config.get("type", "http"),
+                                    endpoint_url=service_config.get("url", ""),
+                                    timeout=service_config.get("timeout", 30),
+                                    headers=service_config.get("headers", {})
+                                )
+                                success = await self.register_service(mcp_service_config)
                             if success:
+                                loaded_count += 1
                                 self.logger.info(f"Successfully loaded MCP service: {service_name}")
                             else:
-                                self.logger.warning(f"Failed to load MCP service: {service_name}")
+                                self.logger.warning(f"Failed to load MCP service: {service_name} (service may be temporarily unavailable)")
 
                         except Exception as e:
                             self.logger.error(f"Error loading MCP service {service_name}: {e}")
 
+                    self.logger.info(f"MCP services loading completed: {loaded_count}/{len(services)} services loaded")
+                    if loaded_count == 0:
+                        self.logger.warning("No MCP services were successfully loaded. System will continue without MCP functionality.")
+                    else:
+                        self.logger.info(f"System initialized with {loaded_count} available MCP services")
+
         except Exception as e:
             self.logger.error(f"Failed to load MCP services config: {e}")
+            self.logger.warning("Continuing without MCP services. System will function with local processing only.")
 
     async def close(self) -> None:
         """关闭服务管理器"""
@@ -658,6 +686,55 @@ class UnifiedMCPManager:
         self.tool_registry._tools.clear()
         self.tool_registry._service_tools.clear()
         self._is_initialized = False
+
+    async def _register_service_with_config(self, connection_config: MCPConnectionConfig) -> bool:
+        """使用MCPConnectionConfig注册MCP服务"""
+        try:
+            self.logger.info(f"Registering MCP service: {connection_config.name}")
+            self.logger.debug(f"Connection config: {connection_config}")
+
+            # 根据服务类型创建客户端
+            if connection_config.service_type == "stdio":
+                if not MCP_AVAILABLE:
+                    self.logger.error(f"MCP library not available for STDIO service: {connection_config.name}")
+                    return False
+                client = StdioClient(connection_config.name, connection_config)
+            else:
+                if not AIOHTTP_AVAILABLE:
+                    self.logger.error(f"aiohttp library not available for HTTP service: {connection_config.name}")
+                    return False
+                client = HttpClient(connection_config.name, connection_config)
+
+            # 将客户端添加到堆栈中管理
+            managed_client = await self.stack.enter_async_context(client)
+            self.clients[connection_config.name] = managed_client
+
+            # 获取并注册工具，如果失败则继续（服务可能暂时不可用）
+            try:
+                tools = await managed_client.list_tools()
+                if tools:
+                    self.tool_registry.register_tools(connection_config.name, tools)
+                    self.logger.info(f"Registered {len(tools)} tools for service {connection_config.name}")
+                else:
+                    self.logger.warning(f"No tools available for service {connection_config.name}")
+            except Exception as e:
+                self.logger.warning(f"Failed to load tools for {connection_config.name}: {e}")
+                # 即使工具加载失败，也注册服务（可能服务暂时不可用但可以重试）
+                # 清理客户端资源
+                try:
+                    await managed_client.close()
+                    del self.clients[connection_config.name]
+                except:
+                    pass
+                return False
+
+            self.logger.info(f"Successfully registered MCP service: {connection_config.name}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to register MCP service {connection_config.name}: {e}")
+            # 不要因为一个服务失败而影响整个系统
+            return False
 
     async def register_service(self, service_config: MCPServiceConfig) -> bool:
         """注册MCP服务"""
@@ -683,19 +760,31 @@ class UnifiedMCPManager:
             managed_client = await self.stack.enter_async_context(client)
             self.clients[connection_config.name] = managed_client
 
-            # 获取并注册工具
+            # 获取并注册工具，如果失败则继续（服务可能暂时不可用）
             try:
                 tools = await managed_client.list_tools()
-                self.tool_registry.register_tools(connection_config.name, tools)
-                self.logger.info(f"Registered {len(tools)} tools for service {connection_config.name}")
+                if tools:
+                    self.tool_registry.register_tools(connection_config.name, tools)
+                    self.logger.info(f"Registered {len(tools)} tools for service {connection_config.name}")
+                else:
+                    self.logger.warning(f"No tools available for service {connection_config.name}")
             except Exception as e:
                 self.logger.warning(f"Failed to load tools for {connection_config.name}: {e}")
+                # 即使工具加载失败，也注册服务（可能服务暂时不可用但可以重试）
+                # 清理客户端资源
+                try:
+                    await managed_client.close()
+                    del self.clients[connection_config.name]
+                except:
+                    pass
+                return False
 
             self.logger.info(f"Successfully registered MCP service: {connection_config.name}")
             return True
 
         except Exception as e:
             self.logger.error(f"Failed to register MCP service {service_config.service_name}: {e}")
+            # 不要因为一个服务失败而影响整个系统
             return False
 
     async def get_available_tools(self, service_name: Optional[str] = None) -> Dict[str, List[MCPTool]]:
@@ -713,14 +802,14 @@ class UnifiedMCPManager:
         if service_name not in self.clients:
             return MCPResult(
                 success=False,
-                error=f"Service {service_name} not registered",
+                error=f"Service {service_name} not registered or unavailable",
                 tool_name=tool_name,
                 service_name=service_name
             )
 
         client = self.clients[service_name]
         start_time = asyncio.get_event_loop().time()
-        max_retries = 3
+        max_retries = 2  # 减少重试次数，避免长时间等待
         retry_delay = 1.0
 
         for attempt in range(max_retries):
@@ -744,6 +833,18 @@ class UnifiedMCPManager:
                     service_name=service_name
                 )
 
+            except asyncio.TimeoutError as e:
+                execution_time = asyncio.get_event_loop().time() - start_time
+                error_str = f"Tool {tool_name} call timeout after {execution_time:.2f}s"
+                self.logger.error(error_str)
+                return MCPResult(
+                    success=False,
+                    error=error_str,
+                    execution_time=execution_time,
+                    tool_name=tool_name,
+                    service_name=service_name
+                )
+
             except Exception as e:
                 execution_time = asyncio.get_event_loop().time() - start_time
                 error_str = str(e)
@@ -751,7 +852,7 @@ class UnifiedMCPManager:
                 # 检查是否为可重试的错误
                 if attempt < max_retries - 1 and self._is_retryable_error(error_str):
                     self.logger.warning(f"Tool {tool_name} call failed (attempt {attempt + 1}/{max_retries}): {error_str}")
-                    await asyncio.sleep(retry_delay * (2 ** attempt))  # 指数退避
+                    await asyncio.sleep(retry_delay * (attempt + 1))  # 线性退避
                     continue
 
                 self.logger.error(f"Failed to call tool {tool_name}: {error_str}")

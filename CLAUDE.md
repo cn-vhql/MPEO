@@ -15,14 +15,19 @@ The system follows a modular architecture with clear separation of concerns:
 2. **Human Feedback Interface** (`mpeo/interfaces/cli.py`) - Interactive CLI for task graph visualization and modification
 3. **Executor Model** (`mpeo/core/executor.py`) - Executes task graphs with parallel/serial scheduling and MCP service integration
 4. **Output Model** (`mpeo/core/output.py`) - Integrates results and resolves conflicts into final output
+5. **System Coordinator** (`mpeo/core/coordinator.py`) - Orchestrates all components
 
-### Supporting Modules
-- **System Coordinator** (`mpeo/core/coordinator.py`) - Orchestrates all components
+### Services (`mpeo/services/`)
 - **Database Manager** (`mpeo/services/database.py`) - SQLite-based persistence
-- **Data Models** (`mpeo/models/`) - Pydantic models for validation
-  - `models/task.py` - Task-related models (TaskNode, TaskGraph, ExecutionResult, etc.)
-  - `models/session.py` - Session models (TaskSession)
-  - `models/config.py` - Configuration models (SystemConfig, MCPServiceConfig)
+- **MCP Common** (`mpeo/services/mcp_common.py`) - MCP protocol utilities
+- **Configuration Loader** (`mpeo/services/configuration_loader.py`) - Dynamic configuration loading
+- **Unified MCP Manager** (`mpeo/services/unified_mcp_manager.py`) - Centralized MCP service management
+
+### Data Models (`mpeo/models/`)
+- **Task Models** (`models/task.py`) - TaskNode, TaskGraph, ExecutionResult, etc.
+- **Session Models** (`models/session.py`) - TaskSession for workflow tracking
+- **Config Models** (`models/config.py`) - SystemConfig, MCPServiceConfig
+- **Agent Config** (`models/agent_config.py`) - Per-agent model configurations
 
 ### Utilities (`mpeo/utils/`)
 - **Logging** (`utils/logging.py`) - Centralized logging setup
@@ -36,13 +41,26 @@ The system follows a modular architecture with clear separation of concerns:
 
 ## Development Commands
 
+### Environment Setup
+```bash
+# Install dependencies in development mode
+pip install -e .
+
+# Or using uv (if available)
+uv pip install -e .
+
+# Copy environment configuration
+cp .env.example .env
+# Edit .env to add your OPENAI_API_KEY and other settings
+```
+
 ### Running the System
 ```bash
 # Basic interactive mode
 python main.py
 
 # With custom configuration
-python main.py --config CONFIG.json --max-parallel 8 --model gpt-4
+python main.py --config config/custom.json --max-parallel 8 --model gpt-4
 
 # Available options:
 --config CONFIG       # Configuration file path
@@ -53,26 +71,33 @@ python main.py --config CONFIG.json --max-parallel 8 --model gpt-4
 --db-path DB_PATH     # Database path (default: data/databases/mpeo.db)
 ```
 
-### Testing
+### Database Management
 ```bash
-# Run system tests
-python scripts/test_system.py
+# Database is automatically created on first run
+# Default location: data/databases/mpeo.db
+# Log files organized by date: data/logs/YYYY-MM-DD.log
 
-# MCP service testing
-python scripts/mcp_service_test.py
-
-# MCP fix validation
-python scripts/test_mcp_fix.py
-
-# Debug MCP API
-python scripts/debug_mcp_api.py
+# To reset database (WARNING: deletes all data)
+rm data/databases/mpeo.db
 ```
 
 ### Configuration
-- Environment variables in `.env` (OPENAI_API_KEY required)
-- MCP services configuration in `config/mcp_services.json`
-- Default database: `data/databases/mpeo.db` (SQLite)
-- Log files: `data/logs/` (organized by date)
+- **Environment variables**: `.env` file (OPENAI_API_KEY required)
+  - Supports per-agent configuration (planner, executor, output models)
+  - Global and individual API keys, bases, and organization IDs
+- **MCP services**: `config/mcp_services.json` - Pre-configured services (fetch, context7-mcp, Time-MCP)
+- **Agent models**: `config/agent_models.json` - Model configurations for different agents
+- **Default database**: `data/databases/mpeo.db` (SQLite)
+- **Log files**: `data/logs/` (organized by date)
+
+### Package Management
+```bash
+# The project uses pyproject.toml for dependency management
+# Key dependencies: openai>=1.0.0, aiohttp>=3.8.0, pydantic>=2.0.0, rich>=13.0.0, networkx>=3.0
+
+# To add new dependencies, update pyproject.toml and reinstall:
+pip install -e .
+```
 
 ## Key Technical Patterns
 
@@ -107,15 +132,16 @@ During system execution, these commands are available:
 
 ## Development Notes
 
-- Uses Python 3.11+ with async/await patterns throughout
-- Strong typing with Pydantic models for data validation
-- Rich library for CLI interface with tables and panels
-- Comprehensive error handling and logging to files
-- Environment-based configuration management
-- Database operations use SQLite with transaction management
-- Modular architecture with clear separation of concerns
-- Centralized logging and configuration utilities
-- Custom exception classes for better error handling
+- **Python Version**: Requires Python 3.11+ with extensive async/await patterns
+- **Type Safety**: Strong typing with Pydantic models for data validation and serialization
+- **CLI Interface**: Rich library for beautiful terminal output with tables, panels, and progress indicators
+- **Error Handling**: Comprehensive error handling with file-based logging and custom exception classes
+- **Configuration Management**: Environment-based configuration with runtime overrides support
+- **Database**: SQLite with transaction management, automatic schema creation, and query optimization
+- **Architecture**: Modular design with clear separation of concerns and dependency injection
+- **Logging**: Centralized logging system with daily rotation and structured log formats
+- **MCP Integration**: Full Model Context Protocol support with multiple service types
+- **Agent Configuration**: Per-agent model configuration supporting different OpenAI models for different roles
 
 ## File Structure Best Practices
 
@@ -132,11 +158,42 @@ When working with this codebase:
 ## Import Patterns
 
 ```python
-# Good - Use specific imports
+# Good - Use specific imports from package level
 from mpeo.core import SystemCoordinator
 from mpeo.models import TaskGraph, SystemConfig
 from mpeo.utils.logging import get_logger
+from mpeo.services import DatabaseManager
 
-# Avoid - Import from too deep
-from mpeo.core.coordinator import SystemCoordinator  # OK but prefer above
+# Acceptable - Import from submodules when needed
+from mpeo.core.coordinator import SystemCoordinator
+from mpeo.models.task import TaskNode
+from mpeo.services.unified_mcp_manager import UnifiedMCPManager
+
+# Avoid - Deep imports unless necessary
+from mpeo.core.coordinator import SomeInternalClass  # Prefer package-level imports
 ```
+
+## Common Development Patterns
+
+### Adding New MCP Services
+1. Update `config/mcp_services.json` with service configuration
+2. Use `mcp register <service_name> <url>` command for dynamic registration
+3. Services automatically available in executor model for task execution
+
+### Working with Task Graphs
+- Task graphs are DAGs (Directed Acyclic Graphs) managed by NetworkX
+- Use `TaskNode` for individual tasks with dependency definitions
+- Executor handles parallel/serial scheduling based on dependencies
+- All task results are stored in SQLite for audit and debugging
+
+### Configuration Management
+- Environment variables in `.env` provide base configuration
+- Per-agent configuration in `config/agent_models.json` for model customization
+- Runtime configuration changes via `config set/get` commands
+- Configuration loader supports hot-reloading for most settings
+
+### Error Handling
+- Use custom exceptions from `mpeo.utils.exceptions` for consistent error types
+- All operations are logged with context and timestamps
+- Database operations use transactions with automatic rollback on errors
+- MCP service failures trigger automatic retries with exponential backoff

@@ -24,7 +24,7 @@ def setup_logging(log_level: str = "INFO", log_dir: str = "logs"):
 
     # 创建日志目录
     log_path = Path(log_dir)
-    log_path.mkdir(exist_ok=True)
+    log_path.mkdir(parents=True, exist_ok=True)
 
     # 生成日志文件名
     current_date = datetime.now().strftime("%Y-%m-%d")

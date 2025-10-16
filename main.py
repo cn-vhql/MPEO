@@ -8,8 +8,12 @@ import sys
 import argparse
 from pathlib import Path
 
-# Add the project root to Python path
-sys.path.insert(0, str(Path(__file__).parent))
+# Ensure proper package structure
+if __name__ == "__main__" and __package__ is None:
+    # Only add to path if running as script and not in package context
+    project_root = Path(__file__).parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 from mpeo.core import CLIInterface
 from mpeo.models import SystemConfig
