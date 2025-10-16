@@ -30,12 +30,12 @@
 ### 技术特点
 
 - 🤖 **AI驱动**: 使用OpenAI GPT模型进行智能任务分解和结果整合
-- 🎯 **智能体独立配置**: 支持为规划、执行、输出智能体配置不同的大模型
 - 🔄 **异步执行**: 支持多任务并行处理，提高执行效率
 - 💾 **数据持久化**: 使用SQLite存储会话历史和执行结果
 - 🎛️ **可配置**: 支持灵活的系统配置和MCP服务注册
 - 📊 **可视化**: 基于Rich库的美观命令行界面
 - 🔍 **日志追踪**: 完整的操作日志记录和错误追踪
+- 🔌 **MCP集成**: 完整支持Model Context Protocol标准
 
 ## 📦 安装和配置
 
@@ -63,21 +63,9 @@ cp .env.example .env
 # 编辑 .env 文件，添加你的 OpenAI API Key
 ```
 
-4. **配置智能体模型（推荐）**
-```bash
-# 复制智能体配置模板
-cp config/agent_models.example.json config/agent_models.json
-
-# 根据需要编辑配置文件
-# 可以为规划、执行、输出智能体设置不同的模型
-```
-
-5. **验证安装**
+4. **验证安装**
 ```bash
 python main.py --help
-
-# 运行智能体配置演示
-python scripts/demo_agent_configs.py
 ```
 
 ## 🎯 使用方法
@@ -89,25 +77,6 @@ python scripts/demo_agent_configs.py
 python main.py
 ```
 
-### 智能体模型配置
-
-系统支持为不同智能体配置独立的大模型：
-
-```bash
-# 查看可用预设配置
-python -c "
-from mpeo.utils.config import list_available_presets
-presets = list_available_presets()
-for name, desc in presets.items():
-    print(f'{name}: {desc}')
-"
-
-# 使用预设配置
-python main.py --agent-preset high_quality  # 高质量配置
-python main.py --agent-preset speed_optimized  # 速度优化配置
-python main.py --agent-preset cost_optimized  # 成本优化配置
-```
-
 ### 命令行参数
 
 ```bash
@@ -115,35 +84,11 @@ python main.py [选项]
 
 选项:
   --config CONFIG       配置文件路径
-  --agent-config CONFIG 智能体模型配置文件路径
-  --agent-preset PRESET 使用预设智能体配置
   --max-parallel MAX    最大并行任务数 (默认: 4)
   --timeout TIMEOUT     MCP服务超时时间(秒) (默认: 30)
   --retries RETRIES     任务重试次数 (默认: 3)
   --model MODEL         OpenAI模型名称 (默认: gpt-3.5-turbo)
-  --db-path DB_PATH     数据库路径 (默认: mpeo.db)
-```
-
-### 智能体配置示例
-
-```json
-{
-  "planner": {
-    "model_name": "gpt-4",
-    "temperature": 0.3,
-    "system_prompt": "你是一个专业的任务规划专家..."
-  },
-  "executor": {
-    "model_name": "gpt-3.5-turbo",
-    "temperature": 0.2,
-    "system_prompt": "你是一个高效的任务执行专家..."
-  },
-  "output": {
-    "model_name": "gpt-4",
-    "temperature": 0.4,
-    "system_prompt": "你是一个专业的内容整合专家..."
-  }
-}
+  --db-path DB_PATH     数据库路径 (默认: data/databases/mpeo.db)
 ```
 
 ### 交互式命令
@@ -161,19 +106,19 @@ python main.py [选项]
 
 ### 使用示例
 
-1. **简单查询**
+1. **时间查询**
 ```
-请帮我分析一下当前的市场趋势
+当前时间
 ```
 
-2. **复杂数据处理**
+2. **网页抓取**
+```
+请抓取 https://example.com 的内容
+```
+
+3. **复杂数据处理**
 ```
 请帮我分析最近一个月的销售数据，生成包括趋势分析、异常检测和预测报告的完整分析结果
-```
-
-3. **指定输出格式**
-```
-请以表格形式展示产品对比分析结果
 ```
 
 ## 🏗️ 系统架构
@@ -198,32 +143,71 @@ python main.py [选项]
 最终结果
 ```
 
+## 🔧 MCP服务集成
+
+系统已预配置了多个MCP服务，支持以下功能：
+
+### 预配置服务
+
+1. **fetch** - 网页抓取工具
+   - 获取URL内容并转换为markdown格式
+   - 支持多种内容格式
+
+2. **context7-mcp** - 文档查询工具
+   - 获取编程库的最新文档
+   - 支持代码示例和API参考
+
+3. **Time-MCP** - 时间处理工具
+   - 当前时间查询
+   - 时区转换
+   - 时间戳处理
+   - 日期计算
+
+### MCP服务配置
+
+MCP服务配置位于 `config/mcp_services.json`：
+
+```json
+{
+  "mcpServices": {
+    "fetch": {
+      "type": "jsonrpc",
+      "url": "https://mcp.api-inference.modelscope.net/9ccb10acb11f4d/mcp",
+      "timeout": 30,
+      "description": "网页抓取工具 - 获取URL内容并转换为markdown格式"
+    },
+    "context7-mcp": {
+      "type": "jsonrpc",
+      "url": "https://mcp.api-inference.modelscope.net/d49e76846b6647/mcp",
+      "timeout": 30,
+      "description": "Context7文档查询工具 - 获取编程库的最新文档"
+    },
+    "Time-MCP": {
+      "type": "jsonrpc",
+      "url": "https://mcp.api-inference.modelscope.net/f0e7d9f896f64f/mcp",
+      "timeout": 30,
+      "description": "时间处理工具 - 当前时间、时区转换、时间戳等功能"
+    }
+  }
+}
+```
+
+### 动态注册MCP服务
+
+```bash
+# 在交互界面中执行
+mcp register custom_service http://localhost:8080/mcp
+```
+
 ## 📊 数据模型
 
 ### 任务图 (Task Graph)
 
-```json
-{
-  "task_graph": {
-    "nodes": [
-      {
-        "task_id": "T1",
-        "task_desc": "数据收集",
-        "task_type": "mcp调用",
-        "expected_output": "原始数据集",
-        "priority": 5
-      }
-    ],
-    "edges": [
-      {
-        "from_task_id": "T1",
-        "to_task_id": "T2",
-        "dependency_type": "数据依赖"
-      }
-    ]
-  }
-}
-```
+系统使用DAG结构表示任务依赖关系：
+
+- **任务节点**: 包含任务描述、类型、优先级等信息
+- **依赖边**: 定义任务间的数据依赖关系
+- **执行调度**: 根据依赖关系自动调度任务执行
 
 ### 执行结果 (Execution Results)
 
@@ -244,42 +228,6 @@ python main.py [选项]
 }
 ```
 
-## 🔧 MCP服务集成
-
-系统支持与外部MCP服务集成，用于执行特定领域的任务：
-
-### 注册MCP服务
-
-```bash
-# 在交互界面中执行
-mcp register weather_service http://localhost:8080/weather
-mcp register data_analyzer http://localhost:8081/analyze
-```
-
-### MCP服务接口规范
-
-MCP服务需要实现以下HTTP接口：
-
-```http
-POST /endpoint
-Content-Type: application/json
-
-{
-  "task_id": "T1",
-  "input_data": {...},
-  "timeout": 30
-}
-```
-
-响应格式：
-```json
-{
-  "status": "success",
-  "result": {...},
-  "message": "处理完成"
-}
-```
-
 ## 📝 配置说明
 
 ### 环境变量配置
@@ -291,7 +239,7 @@ Content-Type: application/json
 | MAX_PARALLEL_TASKS | 最大并行任务数 | 4 |
 | MCP_SERVICE_TIMEOUT | MCP服务超时时间(秒) | 30 |
 | TASK_RETRY_COUNT | 任务重试次数 | 3 |
-| DATABASE_PATH | 数据库路径 | mpeo.db |
+| DATABASE_PATH | 数据库路径 | data/databases/mpeo.db |
 
 ### 系统配置
 
@@ -360,12 +308,17 @@ CREATE TABLE logs (
    - 确认API配额是否充足
    - 检查网络连接
 
-2. **任务执行失败**
+2. **MCP服务连接失败**
+   - 检查网络连接和服务可用性
+   - 验证服务URL配置是否正确
+   - 查看系统日志了解详细错误信息
+
+3. **任务执行失败**
    - 查看系统日志了解详细错误信息
    - 检查MCP服务是否正常运行
    - 调整任务重试次数和超时时间
 
-3. **数据库错误**
+4. **数据库错误**
    - 确认数据库文件权限
    - 检查磁盘空间是否充足
    - 重新初始化数据库
@@ -373,12 +326,14 @@ CREATE TABLE logs (
 ### 日志查看
 
 ```bash
-# 查看系统日志
+# 在交互界面中查看系统日志
 logs
 
 # 查看特定会话日志
 logs <session_id>
 ```
+
+日志文件位置：`data/logs/YYYY-MM-DD.log`
 
 ## 🤝 贡献指南
 
@@ -394,8 +349,8 @@ logs <session_id>
 
 ## 📚 相关文档
 
-- [智能体配置指南](config/AGENT_MODELS.md) - 详细的智能体模型配置说明
-- [MCP服务配置指南](config/README.md) - MCP服务集成和配置说明
+- [CLAUDE.md](CLAUDE.md) - Claude Code 开发指导文档
+- [QUICKSTART.md](QUICKSTART.md) - 快速开始指南
 
 ## 📞 支持
 
@@ -407,13 +362,22 @@ logs <session_id>
 
 ## 🔄 更新日志
 
+### v1.0.0 (2025-10-16)
+- ✨ **新功能**: 完整的MCP服务集成支持
+- 🔧 集成官方MCP SDK (mcp==1.17.0)
+- 🎯 优化的MCP服务管理器，支持多种连接方式
+- 📋 预配置三个核心MCP服务（fetch、context7-mcp、Time-MCP）
+- 🛠️ 改进的任务执行结果格式化
+- 🧹 项目代码清理，移除冗余和测试代码
+- 🔍 增强的错误处理和日志记录
+- 📊 优化的数据验证和类型安全
+
 ### v0.2.0 (2024-10-15)
 - ✨ **新功能**: 智能体独立模型配置支持
 - 🎯 支持为规划、执行、输出智能体配置不同的大模型
 - 📋 提供多种预设配置（高质量、平衡、速度优化、成本优化等）
 - 🔧 新增智能体配置加载和管理功能
 - 📝 完善的配置文档和使用示例
-- 🧪 新增智能体配置演示脚本
 
 ### v0.1.0 (2024-10-14)
 - 初始版本发布
