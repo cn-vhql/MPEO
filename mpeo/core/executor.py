@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import aiohttp
 from openai import OpenAI
@@ -18,6 +18,7 @@ from ..models import (
 from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
 from ..services.mcp_manager import MCPServiceManager, MCPResult
+from ..services.optimized_mcp_manager import OptimizedMCPServiceManager
 
 
 class TaskExecutor:
@@ -39,6 +40,8 @@ class TaskExecutor:
         )
         self.mcp_services: Dict[str, MCPServiceConfig] = {}
         self.mcp_manager: Optional[MCPServiceManager] = None
+        self.optimized_mcp_manager: Optional[OptimizedMCPServiceManager] = None
+        self.use_optimized_mcp: bool = True  # Flag to control which MCP manager to use
         self.execution_context: Dict[str, Any] = {}
 
     @property
@@ -50,20 +53,45 @@ class TaskExecutor:
         """Register an MCP service configuration"""
         self.mcp_services[service_config.service_name] = service_config
 
-        # Initialize MCP manager if needed
-        if self.mcp_manager is None:
-            self.mcp_manager = MCPServiceManager()
-            await self.mcp_manager.initialize()
+        # Use optimized MCP manager if enabled
+        if self.use_optimized_mcp:
+            # Initialize optimized MCP manager if needed
+            if self.optimized_mcp_manager is None:
+                self.optimized_mcp_manager = OptimizedMCPServiceManager()
+                await self.optimized_mcp_manager.initialize()
 
-        # Register service with manager
-        success = await self.mcp_manager.register_from_service_config(service_config)
+            # Register service with optimized manager
+            success = await self.optimized_mcp_manager.register_from_service_config(service_config)
+            manager_name = "optimized_mcp_manager"
+        else:
+            # Initialize legacy MCP manager if needed
+            if self.mcp_manager is None:
+                self.mcp_manager = MCPServiceManager()
+                await self.mcp_manager.initialize()
+
+            # Register service with legacy manager
+            success = await self.mcp_manager.register_from_service_config(service_config)
+            manager_name = "legacy_mcp_manager"
 
         if success:
             self.database.log_event(None, "executor", "mcp_service_registered",
-                                   f"Service: {service_config.service_name}")
+                                   f"Service: {service_config.service_name} using {manager_name}")
         else:
             self.database.log_event(None, "executor", "mcp_service_registration_failed",
-                                   f"Service: {service_config.service_name}")
+                                   f"Service: {service_config.service_name} using {manager_name}")
+
+    def get_current_mcp_manager(self):
+        """Get the currently active MCP manager, initializing if necessary"""
+        if self.use_optimized_mcp:
+            if self.optimized_mcp_manager is None:
+                self.optimized_mcp_manager = OptimizedMCPServiceManager()
+                # Note: We'll initialize it lazily when needed
+            return self.optimized_mcp_manager
+        else:
+            if self.mcp_manager is None:
+                self.mcp_manager = MCPServiceManager()
+                # Note: We'll initialize it lazily when needed
+            return self.mcp_manager
     
     async def execute_task_graph(self, task_graph: TaskGraph, user_query: str, session_id: str) -> ExecutionResults:
         """
@@ -328,9 +356,19 @@ class TaskExecutor:
     
     async def _execute_mcp_call(self, task: TaskNode, input_data: Dict[str, Any],
                               user_query: str, session_id: str) -> Any:
-        """Execute MCP service call using the new MCP service manager"""
-        if self.mcp_manager is None:
-            raise ValueError("MCP service manager not initialized")
+        """Execute MCP service call using the optimized MCP service manager"""
+        current_manager = self.get_current_mcp_manager()
+
+        # Ensure the manager is initialized
+        if not hasattr(current_manager, '_is_initialized') or not current_manager._is_initialized:
+            try:
+                await current_manager.initialize()
+                self.database.log_event(session_id, "executor", "mcp_manager_initialized",
+                                       f"Initialized {type(current_manager).__name__}")
+            except Exception as e:
+                self.database.log_event(session_id, "executor", "mcp_manager_init_failed",
+                                       f"Failed to initialize MCP manager: {str(e)}")
+                raise ValueError(f"Failed to initialize MCP service manager: {str(e)}")
 
         # Extract service name from task description or use default
         service_name = self._extract_service_name(task.task_desc)
@@ -339,8 +377,8 @@ class TaskExecutor:
                                f"Task: {task.task_id}, Service: {service_name}")
 
         # Check if service is registered
-        if not self.mcp_manager.is_service_registered(service_name):
-            available_services = self.mcp_manager.get_registered_services()
+        if not current_manager.is_service_registered(service_name):
+            available_services = current_manager.get_registered_services()
             self.database.log_event(session_id, "executor", "mcp_service_not_found",
                                    f"Service '{service_name}' not registered. Available: {available_services}")
             raise ValueError(f"MCP service '{service_name}' not registered")
@@ -352,11 +390,12 @@ class TaskExecutor:
             # Prepare arguments for the tool call
             arguments = await self._prepare_tool_arguments(tool_name, task, input_data, user_query)
 
+            manager_type = "optimized" if self.use_optimized_mcp else "legacy"
             self.database.log_event(session_id, "executor", "mcp_tool_call",
-                                   f"Calling tool: {tool_name} on service: {service_name}")
+                                   f"Calling tool: {tool_name} on service: {service_name} using {manager_type} manager")
 
-            # Call the tool through the MCP manager
-            result: MCPResult = await self.mcp_manager.call_tool(
+            # Call the tool through the current MCP manager
+            result: MCPResult = await current_manager.call_tool(
                 service_name=service_name,
                 tool_name=tool_name,
                 arguments=arguments
@@ -365,53 +404,75 @@ class TaskExecutor:
             # Log the result
             if result.success:
                 self.database.log_event(session_id, "executor", "mcp_call_success",
-                                       f"Tool {tool_name} completed in {result.execution_time:.2f}s")
-                return result.data
+                                       f"Tool {tool_name} completed in {result.execution_time:.2f}s using {manager_type} manager")
+
+                # Convert MCP result to expected format (str or Dict)
+                formatted_output = self._format_mcp_result(result.data)
+                return formatted_output
             else:
                 self.database.log_event(session_id, "executor", "mcp_call_failed",
-                                       f"Tool {tool_name} failed: {result.error}")
+                                       f"Tool {tool_name} failed: {result.error} using {manager_type} manager")
                 raise Exception(f"MCP tool call failed: {result.error}")
 
         except Exception as e:
+            manager_type = "optimized" if self.use_optimized_mcp else "legacy"
             self.database.log_event(session_id, "executor", "mcp_call_error",
-                                   f"MCP call failed: {str(e)}")
+                                   f"MCP call failed: {str(e)} using {manager_type} manager")
             raise
 
     def _extract_service_name(self, task_desc: str) -> str:
         """Extract MCP service name from task description"""
+        current_manager = self.get_current_mcp_manager()
+        task_desc_lower = task_desc.lower()
+
         # Try to extract service name from task description
-        if "mcp_" in task_desc.lower():
+        if "mcp_" in task_desc_lower:
             # Try to extract service name after "mcp_"
-            parts = task_desc.lower().split("mcp_")
+            parts = task_desc_lower.split("mcp_")
             if len(parts) > 1:
                 service_name = parts[1].split()[0]
                 # Check if this service is registered
-                if self.mcp_manager and self.mcp_manager.is_service_registered(service_name):
+                if current_manager and current_manager.is_service_registered(service_name):
                     return service_name
 
-        # Try to find service name in description
-        if self.mcp_manager:
-            for service_name in self.mcp_manager.get_registered_services():
-                if service_name.lower() in task_desc.lower():
-                    return service_name
+        # Enhanced service name extraction for common patterns
+        # Time-related tasks
+        if any(keyword in task_desc_lower for keyword in ["时间", "time", "当前时间", "现在几点", "获取时间"]):
+            if current_manager and current_manager.is_service_registered("Time-MCP"):
+                return "Time-MCP"
+            elif current_manager and current_manager.is_service_registered("time-mcp"):
+                return "time-mcp"
+            elif current_manager and current_manager.is_service_registered("time"):
+                return "time"
 
-        # Enhanced service name extraction
-        # Check for common MCP service patterns
-        if "fetch" in task_desc.lower() or "获取" in task_desc:
-            if self.mcp_manager and self.mcp_manager.is_service_registered("fetch"):
+        # Web fetching tasks
+        if any(keyword in task_desc_lower for keyword in ["fetch", "获取", "抓取", "网页"]):
+            if current_manager and current_manager.is_service_registered("fetch"):
                 return "fetch"
 
-        if "bing" in task_desc.lower() or "搜索" in task_desc:
-            if self.mcp_manager and self.mcp_manager.is_service_registered("bing-cn-mcp-server"):
+        # Search tasks
+        if any(keyword in task_desc_lower for keyword in ["search", "搜索", "查找", "bing"]):
+            if current_manager and current_manager.is_service_registered("bing-cn-mcp-server"):
                 return "bing-cn-mcp-server"
 
+        # Documentation/tasks
+        if any(keyword in task_desc_lower for keyword in ["context7", "文档", "documentation", "库"]):
+            if current_manager and current_manager.is_service_registered("context7-mcp"):
+                return "context7-mcp"
+
+        # Try to find service name in description
+        if current_manager:
+            for service_name in current_manager.get_registered_services():
+                if service_name.lower() in task_desc_lower:
+                    return service_name
+
         # Use first available service as default
-        if self.mcp_manager:
-            services = self.mcp_manager.get_registered_services()
+        if current_manager:
+            services = current_manager.get_registered_services()
             if services:
                 return services[0]
 
-        # No services available
+        # No services available, return default
         return "default"
 
     def _extract_tool_name(self, task_desc: str) -> str:
@@ -419,21 +480,45 @@ class TaskExecutor:
         # Look for common tool patterns in task description
         task_desc_lower = task_desc.lower()
 
+        # Time-related tools
+        if any(keyword in task_desc_lower for keyword in [
+            "时间", "time", "当前时间", "现在几点", "获取时间", "current time"
+        ]):
+            return "current_time"
+
         # Common tool name patterns
-        if "fetch" in task_desc_lower or "get" in task_desc_lower or "获取" in task_desc_lower:
+        if any(keyword in task_desc_lower for keyword in [
+            "fetch", "get", "获取", "抓取", "retrieve"
+        ]):
             return "fetch"
-        elif "search" in task_desc_lower or "查找" in task_desc_lower or "搜索" in task_desc_lower:
+        elif any(keyword in task_desc_lower for keyword in [
+            "search", "查找", "搜索", "find"
+        ]):
             return "search"
-        elif "process" in task_desc_lower or "处理" in task_desc_lower:
+        elif any(keyword in task_desc_lower for keyword in [
+            "process", "处理", "handle"
+        ]):
             return "process"
-        elif "analyze" in task_desc_lower or "分析" in task_desc_lower:
+        elif any(keyword in task_desc_lower for keyword in [
+            "analyze", "分析", "analysis"
+        ]):
             return "analyze"
-        elif "calculate" in task_desc_lower or "计算" in task_desc_lower:
+        elif any(keyword in task_desc_lower for keyword in [
+            "calculate", "计算", "compute"
+        ]):
             return "calculate"
-        elif "translate" in task_desc_lower or "翻译" in task_desc_lower:
+        elif any(keyword in task_desc_lower for keyword in [
+            "translate", "翻译", "translation"
+        ]):
             return "translate"
-        elif "summarize" in task_desc_lower or "总结" in task_desc_lower or "摘要" in task_desc_lower:
+        elif any(keyword in task_desc_lower for keyword in [
+            "summarize", "总结", "摘要", "summary"
+        ]):
             return "summarize"
+        elif any(keyword in task_desc_lower for keyword in [
+            "docs", "文档", "documentation", "library"
+        ]):
+            return "get_library_docs"
         else:
             # Default tool name
             return "execute"
@@ -442,14 +527,15 @@ class TaskExecutor:
                                    input_data: Dict[str, Any], user_query: str) -> Dict[str, Any]:
         """Prepare arguments for MCP tool call based on tool requirements"""
 
-        # Get tool schema from MCP manager
+        # Get tool schema from current MCP manager
         tool_schema = None
         try:
-            if self.mcp_manager:
+            current_manager = self.get_current_mcp_manager()
+            if current_manager:
                 # Get the service that contains this tool
                 service_name = self._extract_service_name(task.task_desc)
-                if service_name and self.mcp_manager.is_service_registered(service_name):
-                    tools = await self.mcp_manager.get_available_tools(service_name)
+                if service_name and current_manager.is_service_registered(service_name):
+                    tools = await current_manager.get_available_tools(service_name)
                     if service_name in tools:
                         for tool in tools[service_name]:
                             if tool.name == tool_name:
@@ -479,6 +565,21 @@ class TaskExecutor:
                     if param_name not in arguments and "default" in param_info:
                         arguments[param_name] = param_info["default"]
 
+            return arguments
+
+        # Special handling for time-related tools
+        if tool_name == "current_time":
+            arguments = {}
+            # Use default format based on tool schema
+            arguments["format"] = "YYYY-MM-DD HH:mm:ss"
+
+            # Check if timezone is mentioned
+            if "timezone" in task.task_desc.lower() or "时区" in task.task_desc:
+                # Try to extract timezone from task description
+                import re
+                timezone_match = re.search(r'(?:timezone|时区)[:\s]*([a-zA-Z_/\-+]+)', task.task_desc, re.IGNORECASE)
+                if timezone_match:
+                    arguments["timezone"] = timezone_match.group(1)
             return arguments
 
         # Default argument preparation for other tools
@@ -538,11 +639,46 @@ class TaskExecutor:
 
         return None
 
+    def _format_mcp_result(self, mcp_data: Any) -> Union[str, Dict[str, Any]]:
+        """Format MCP result data to match ExecutionResult expectations"""
+        if isinstance(mcp_data, str):
+            return mcp_data
+        elif isinstance(mcp_data, dict):
+            return mcp_data
+        elif isinstance(mcp_data, list):
+            # Handle list format from MCP tools
+            if not mcp_data:
+                return "Empty result"
+
+            # If list contains text content blocks, extract and concatenate text
+            if len(mcp_data) == 1 and isinstance(mcp_data[0], dict):
+                item = mcp_data[0]
+                if item.get("type") == "text" and "text" in item:
+                    return item["text"]
+
+            # If multiple items, try to extract text from all text blocks
+            text_parts = []
+            for item in mcp_data:
+                if isinstance(item, dict) and item.get("type") == "text" and "text" in item:
+                    text_parts.append(item["text"])
+
+            if text_parts:
+                return " ".join(text_parts)
+
+            # Fallback: convert list to string representation
+            return str(mcp_data)
+        else:
+            # Fallback for other data types
+            return str(mcp_data)
+
     async def cleanup_mcp_manager(self):
         """Cleanup MCP service manager"""
         if self.mcp_manager:
             await self.mcp_manager.close()
             self.mcp_manager = None
+        if self.optimized_mcp_manager:
+            await self.optimized_mcp_manager.close()
+            self.optimized_mcp_manager = None
 
     async def _execute_data_processing(self, task: TaskNode, input_data: Dict[str, Any],
                                      session_id: str) -> Any:
