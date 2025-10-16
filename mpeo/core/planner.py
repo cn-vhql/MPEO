@@ -9,7 +9,7 @@ from openai import OpenAI
 from ..models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType
 from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
-from ..services.mcp_manager import MCPServiceManager, MCPTool
+from ..services.unified_mcp_manager import UnifiedMCPManager, MCPTool
 
 
 class PlannerModel:
@@ -25,7 +25,7 @@ class PlannerModel:
             max_tokens=2000,
             timeout=60
         )
-        self.mcp_manager: Optional[MCPServiceManager] = None
+        self.mcp_manager: Optional[UnifiedMCPManager] = None
         self.available_mcp_tools: Dict[str, List[MCPTool]] = {}
 
     @property
@@ -33,7 +33,7 @@ class PlannerModel:
         """获取模型名称"""
         return self.model_config.model_name
 
-    async def set_mcp_manager(self, mcp_manager: MCPServiceManager):
+    async def set_mcp_manager(self, mcp_manager: UnifiedMCPManager):
         """设置MCP服务管理器并获取可用工具信息"""
         self.mcp_manager = mcp_manager
         await self.refresh_mcp_tools()
