@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 from ..models import TaskSession, TaskGraph, ExecutionResults, SystemConfig, MCPServiceConfig
 from ..models.agent_config import MultiAgentConfig, OpenAIApiConfig
 from ..services import DatabaseManager
-from ..services.mcp_manager import MCPServiceManager
-from ..utils.config import load_agent_config
+from ..services.unified_mcp_manager import UnifiedMCPManager
+from ..services.configuration_loader import get_config_loader
 from .planner import PlannerModel
 from .executor import TaskExecutor
 from .output import OutputModel
@@ -43,14 +43,15 @@ class SystemCoordinator:
         # Initialize configuration
         self.config = config or SystemConfig()
 
-        # Load agent configuration
+        # Load agent configuration using unified configuration loader
+        config_loader = get_config_loader()
         if agent_config:
             self.agent_config = agent_config
         elif agent_config_path:
-            self.agent_config = load_agent_config(agent_config_path)
+            self.agent_config = config_loader.load_agent_config(agent_config_path)
         else:
             # Try to load from default path, otherwise use default config
-            self.agent_config = load_agent_config()
+            self.agent_config = config_loader.load_agent_config()
 
         # Always read OPENAI_MODEL from environment and override if present
         openai_model = os.getenv("OPENAI_MODEL")
@@ -65,7 +66,7 @@ class SystemCoordinator:
         self.database = DatabaseManager(self.config.database_path)
 
         # Initialize MCP service manager
-        self.mcp_manager = MCPServiceManager()
+        self.mcp_manager = UnifiedMCPManager()
 
         # Initialize components with individual model configurations and clients
         self.planner = PlannerModel(
@@ -196,43 +197,9 @@ class SystemCoordinator:
         pass
     
     async def _load_mcp_services_from_config(self):
-        """Load MCP services from configuration file"""
-        try:
-            import json
-            import os
-
-            # Look for mcp_services.json in the config directory
-            config_file_path = "config/mcp_services.json"
-            if os.path.exists(config_file_path):
-                with open(config_file_path, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-
-                # Load MCP services from config
-                if "mcpServices" in config_data:
-                    for service_name, service_config in config_data["mcpServices"].items():
-                        try:
-                            # Convert config to MCPServiceConfig
-                            mcp_config = MCPServiceConfig(
-                                service_name=service_name,
-                                service_type=service_config.get("type", "http"),
-                                endpoint_url=service_config.get("url", ""),
-                                timeout=service_config.get("timeout", 30),
-                                headers=service_config.get("headers", {})
-                            )
-
-                            # Register the service with MCP manager
-                            await self.mcp_manager.register_from_service_config(mcp_config)
-                            logging.info(f"MCP service '{service_name}' loaded from config file")
-
-                        except Exception as e:
-                            logging.error(f"Failed to load MCP service '{service_name}' from config: {str(e)}")
-
-                logging.info(f"MCP services loaded from config file: {config_file_path}")
-            else:
-                logging.info("No config/mcp_services.json file found, skipping MCP service loading from config")
-
-        except Exception as e:
-            logging.error(f"Failed to load MCP services from config file: {str(e)}")
+        """Load MCP services from configuration file - delegated to unified manager"""
+        # The unified MCP manager now handles configuration loading automatically
+        logging.info("MCP services configuration loading delegated to UnifiedMCPManager")
     
     def _update_planner_mcp_services(self):
         """Update planner with available MCP services"""
@@ -431,15 +398,14 @@ class SystemCoordinator:
         await self._ensure_mcp_manager_initialized()
 
         # Register with MCP manager
-        await self.mcp_manager.register_from_service_config(service_config)
+        await self.mcp_manager.register_service(service_config)
+
+        # Save to configuration file
+        config_loader = get_config_loader()
+        config_loader.add_mcp_service(service_config)
 
         # Refresh planner's MCP tools
         await self.planner.refresh_mcp_tools()
-
-        # Save to database
-        mcp_services = self.database.load_config("mcp_services", {})
-        mcp_services[service_config.service_name] = service_config.dict()
-        self.database.save_config("mcp_services", mcp_services)
     
     def get_session_history(self, limit: int = 50) -> list[TaskSession]:
         """Get session history"""

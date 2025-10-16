@@ -12,7 +12,7 @@ class SystemConfig(BaseModel):
     mcp_service_timeout: int = Field(default=30, ge=1, description="MCP service timeout in seconds")
     task_retry_count: int = Field(default=3, ge=0, description="Task retry count")
     openai_model: str = Field(default="gpt-3.5-turbo", description="OpenAI model name")
-    database_path: str = Field(default="mpeo.db", description="SQLite database path")
+    database_path: str = Field(default="data/databases/mpeo.db", description="SQLite database path")
 
 
 class MCPServiceConfig(BaseModel):
