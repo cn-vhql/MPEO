@@ -122,6 +122,25 @@ class MCPConnectionConfig:
     @classmethod
     def from_service_config(cls, service_config) -> "MCPConnectionConfig":
         """从MCPServiceConfig创建连接配置"""
+        # 处理字典类型的配置（向后兼容）
+        if isinstance(service_config, dict):
+            service_type = service_config.get("service_type", service_config.get("type", "http"))
+            service_name = service_config.get("service_name", "")
+            endpoint_url = service_config.get("endpoint_url", service_config.get("url", ""))
+            timeout = service_config.get("timeout", 60)
+            headers = service_config.get("headers", {})
+
+            # 创建临时对象以复用现有逻辑
+            class TempConfig:
+                def __init__(self):
+                    self.service_type = service_type
+                    self.service_name = service_name
+                    self.endpoint_url = endpoint_url
+                    self.timeout = timeout
+                    self.headers = headers
+
+            service_config = TempConfig()
+
         if service_config.service_type == "stdio":
             # STDIO类型服务
             if service_config.endpoint_url.startswith("stdio://"):
@@ -246,6 +265,11 @@ class StdioClient(MCPClientBase):
     def __init__(self, name: str, config: MCPConnectionConfig):
         if not MCP_AVAILABLE:
             raise ImportError("MCP library is not installed. Install with: pip install mcp")
+
+        # 验证配置类型
+        if not isinstance(config, MCPConnectionConfig):
+            raise TypeError(f"config must be MCPConnectionConfig, got {type(config)}: {config}")
+
         super().__init__(name, config)
         self._session: Optional[ClientSession] = None
         self._client: Optional[Any] = None
@@ -267,15 +291,17 @@ class StdioClient(MCPClientBase):
             raise ValueError("Command must be a valid string")
 
         try:
-            # 创建STDIO客户端配置
-            stdio_config = {
-                "command": command,
-                "args": self.config.args,
-                "env": {**os.environ, **self.config.env} if self.config.env else None,
-            }
-            self.logger.debug(f"STDIO client config: {stdio_config}")
+            # 创建STDIO客户端配置 - 使用正确的 StdioServerParameters 类型
+            from mcp.client.stdio import StdioServerParameters
 
-            self._client = stdio_client(stdio_config)
+            stdio_params = StdioServerParameters(
+                command=command,
+                args=self.config.args,
+                env={**os.environ, **self.config.env} if self.config.env else None,
+            )
+            self.logger.debug(f"STDIO client params: command={stdio_params.command}, args={stdio_params.args}")
+
+            self._client = stdio_client(stdio_params)
 
             # 进入上下文
             context = await self.stack.enter_async_context(self._client)
@@ -692,6 +718,12 @@ class UnifiedMCPManager:
         try:
             self.logger.info(f"Registering MCP service: {connection_config.name}")
             self.logger.debug(f"Connection config: {connection_config}")
+            self.logger.debug(f"Connection config type: {type(connection_config)}")
+
+            # 验证配置类型
+            if not isinstance(connection_config, MCPConnectionConfig):
+                self.logger.error(f"Expected MCPConnectionConfig, got {type(connection_config)}: {connection_config}")
+                raise TypeError(f"connection_config must be MCPConnectionConfig, got {type(connection_config)}")
 
             # 根据服务类型创建客户端
             if connection_config.service_type == "stdio":
@@ -736,10 +768,16 @@ class UnifiedMCPManager:
             # 不要因为一个服务失败而影响整个系统
             return False
 
-    async def register_service(self, service_config: MCPServiceConfig) -> bool:
+    async def register_service(self, service_config) -> bool:
         """注册MCP服务"""
         try:
-            self.logger.info(f"Registering MCP service: {service_config.service_name}")
+            # 处理字典类型的配置
+            if isinstance(service_config, dict):
+                service_name = service_config.get("service_name", "unknown")
+            else:
+                service_name = getattr(service_config, 'service_name', 'unknown')
+
+            self.logger.info(f"Registering MCP service: {service_name}")
 
             # 创建连接配置
             connection_config = MCPConnectionConfig.from_service_config(service_config)
@@ -747,12 +785,12 @@ class UnifiedMCPManager:
             # 根据服务类型创建客户端
             if connection_config.service_type == "stdio":
                 if not MCP_AVAILABLE:
-                    self.logger.error(f"MCP library not available for STDIO service: {service_config.service_name}")
+                    self.logger.error(f"MCP library not available for STDIO service: {service_name}")
                     return False
                 client = StdioClient(connection_config.name, connection_config)
             else:
                 if not AIOHTTP_AVAILABLE:
-                    self.logger.error(f"aiohttp library not available for HTTP service: {service_config.service_name}")
+                    self.logger.error(f"aiohttp library not available for HTTP service: {service_name}")
                     return False
                 client = HttpClient(connection_config.name, connection_config)
 
@@ -783,7 +821,13 @@ class UnifiedMCPManager:
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to register MCP service {service_config.service_name}: {e}")
+            # 处理字典类型的配置
+            if isinstance(service_config, dict):
+                service_name = service_config.get("service_name", "unknown")
+            else:
+                service_name = getattr(service_config, 'service_name', 'unknown')
+
+            self.logger.error(f"Failed to register MCP service {service_name}: {e}")
             # 不要因为一个服务失败而影响整个系统
             return False
 

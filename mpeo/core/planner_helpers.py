@@ -22,8 +22,6 @@ class QueryAnalyzer:
 
     async def analyze_query(self, user_query: str, session_id: str) -> Dict[str, Any]:
         """分析用户查询"""
-        print(f"[DEBUG] Planner - Analyzing query: {user_query}")
-        print(f"[DEBUG] Planner - Using model: {self.model_config.model_name}")
 
         prompt = f"""
         请分析以下用户需求，提取关键信息并结构化输出：
@@ -52,9 +50,6 @@ class QueryAnalyzer:
         """
 
         try:
-            print(f"[DEBUG] Planner - Making API call to analyze query...")
-            print(f"[DEBUG] Planner - Using model: {self.model_config.model_name}, temperature: {self.model_config.temperature}")
-
             messages = [
                 {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的需求分析师，擅长将用户需求结构化。"},
                 {"role": "user", "content": prompt}
@@ -69,11 +64,8 @@ class QueryAnalyzer:
                 frequency_penalty=self.model_config.frequency_penalty,
                 presence_penalty=self.model_config.presence_penalty
             )
-            print(f"[DEBUG] Planner - API call successful, response status: {response.choices[0].finish_reason if response.choices else 'No choices'}")
 
             analysis_text = response.choices[0].message.content
-            print(f"[DEBUG] Planner - Analysis response length: {len(analysis_text)} characters")
-            print(f"[DEBUG] Planner - Analysis preview: {analysis_text[:100]}...")
             self.database.log_event(session_id, "planner", "query_analyzed", f"Analysis: {analysis_text[:200]}...")
 
         except Exception as e:
@@ -118,8 +110,6 @@ class TaskGenerator:
     async def generate_tasks(self, analysis_result: Dict[str, Any], available_mcp_tools: Dict[str, Any],
                            session_id: str) -> List[TaskNode]:
         """生成任务节点"""
-        print(f"[DEBUG] Planner - Generating tasks from analysis")
-        print(f"[DEBUG] Planner - Analysis result: {analysis_result}")
 
         # 构建工具信息字符串
         tools_summary = self._build_tools_summary(available_mcp_tools)
@@ -160,9 +150,6 @@ class TaskGenerator:
         """
 
         try:
-            print(f"[DEBUG] Planner - Making API call to generate tasks...")
-            print(f"[DEBUG] Planner - Using model: {self.model_config.model_name}, temperature: {self.model_config.temperature}")
-
             messages = [
                 {"role": "system", "content": self.model_config.system_prompt or "你是一个专业的任务分解专家，擅长将复杂需求分解为可执行的任务。"},
                 {"role": "user", "content": prompt}
@@ -177,11 +164,8 @@ class TaskGenerator:
                 frequency_penalty=self.model_config.frequency_penalty,
                 presence_penalty=self.model_config.presence_penalty
             )
-            print(f"[DEBUG] Planner - Task generation API call successful")
 
             response_text = response.choices[0].message.content
-            print(f"[DEBUG] Planner - Task generation response length: {len(response_text)} characters")
-            print(f"[DEBUG] Planner - Task generation preview: {response_text[:100]}...")
             self.database.log_event(session_id, "planner", "tasks_generated", f"Generated tasks: {response_text[:200]}...")
 
         except Exception as e:
