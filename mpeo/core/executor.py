@@ -167,28 +167,69 @@ class TaskExecutor:
             reverse_map[edge.from_task_id].append(edge.to_task_id)
         return reverse_map
     
-    def _get_ready_tasks(self, task_graph: TaskGraph, task_status: Dict[str, TaskStatus], 
+    def _get_ready_tasks(self, task_graph: TaskGraph, task_status: Dict[str, TaskStatus],
                         dependency_map: Dict[str, List[str]]) -> List[TaskNode]:
-        """Get tasks that are ready to execute (all dependencies completed)"""
+        """Get tasks that are ready to execute (all dependencies completed) with improved logic"""
         ready_tasks = []
-        
+        failed_dependencies = set()
+
         for task in task_graph.nodes:
             if task_status[task.task_id] == TaskStatus.PENDING:
                 # Check if all dependencies are completed successfully
                 dependencies = dependency_map[task.task_id]
-                all_deps_completed = all(
-                    task_status.get(dep, TaskStatus.FAILED) == TaskStatus.SUCCESS 
+
+                # Skip tasks with failed dependencies
+                has_failed_dep = any(
+                    task_status.get(dep, TaskStatus.FAILED) == TaskStatus.FAILED
                     for dep in dependencies
                 )
-                
+
+                if has_failed_dep:
+                    failed_dependencies.add(task.task_id)
+                    continue
+
+                # Check if all dependencies completed successfully
+                all_deps_completed = all(
+                    task_status.get(dep, TaskStatus.SUCCESS) == TaskStatus.SUCCESS
+                    for dep in dependencies
+                )
+
                 if all_deps_completed:
                     ready_tasks.append(task)
-        
-        # Sort by priority (higher priority first)
-        ready_tasks.sort(key=lambda t: t.priority, reverse=True)
-        
-        # Limit by max parallel tasks
-        return ready_tasks[:self.config.max_parallel_tasks]
+
+        # Mark tasks with failed dependencies as failed
+        for task_id in failed_dependencies:
+            task_status[task_id] = TaskStatus.FAILED
+            self.database.log_event("", "executor", "task_skipped_failed_deps",
+                                   f"Task {task_id} skipped due to failed dependencies")
+
+        # Sort by priority (higher priority first), then by task ID for consistency
+        ready_tasks.sort(key=lambda t: (t.priority, t.task_id), reverse=True)
+
+        # Apply smart parallelism limit based on task types
+        parallel_limit = self._calculate_dynamic_parallel_limit(ready_tasks)
+        return ready_tasks[:parallel_limit]
+
+    def _calculate_dynamic_parallel_limit(self, ready_tasks: List[TaskNode]) -> int:
+        """Calculate dynamic parallel limit based on task types and system load"""
+        if not ready_tasks:
+            return 0
+
+        # Count task types
+        mcp_tasks = sum(1 for t in ready_tasks if t.task_type == TaskType.MCP_CALL)
+        local_tasks = sum(1 for t in ready_tasks if t.task_type == TaskType.LOCAL_COMPUTE)
+
+        # MCP calls are I/O bound, can run more in parallel
+        # Local compute tasks are CPU bound, limit concurrency
+        if mcp_tasks > 0 and local_tasks == 0:
+            # All MCP tasks - can run more in parallel
+            return min(len(ready_tasks), self.config.max_parallel_tasks * 2)
+        elif local_tasks > 0 and mcp_tasks == 0:
+            # All local compute tasks - conservative parallelism
+            return min(len(ready_tasks), max(1, self.config.max_parallel_tasks // 2))
+        else:
+            # Mixed tasks - use standard limit
+            return min(len(ready_tasks), self.config.max_parallel_tasks)
     
     async def _execute_tasks_parallel(self, tasks: List[TaskNode], task_graph: TaskGraph,
                                     task_status: Dict[str, TaskStatus], task_outputs: Dict[str, Any],
@@ -334,76 +375,126 @@ class TaskExecutor:
     
     async def _execute_mcp_call(self, task: TaskNode, input_data: Dict[str, Any],
                               user_query: str, session_id: str) -> Any:
-        """Execute MCP service call using the unified MCP service manager"""
+        """Execute MCP service call using the unified MCP service manager with improved error handling"""
         current_manager = self.get_current_mcp_manager()
 
-        # Ensure the manager is initialized
-        if not hasattr(current_manager, '_is_initialized') or not current_manager._is_initialized:
-            try:
+        # Step 1: Ensure the manager is initialized
+        try:
+            if not hasattr(current_manager, '_is_initialized') or not current_manager._is_initialized:
                 await current_manager.initialize()
                 self.database.log_event(session_id, "executor", "mcp_manager_initialized",
                                        f"Initialized UnifiedMCPManager")
-            except Exception as e:
-                self.database.log_event(session_id, "executor", "mcp_manager_init_failed",
-                                       f"Failed to initialize MCP manager: {str(e)}")
-                raise ValueError(f"Failed to initialize MCP service manager: {str(e)}")
+        except Exception as e:
+            error_msg = f"Failed to initialize MCP manager: {str(e)}"
+            self.database.log_event(session_id, "executor", "mcp_manager_init_failed", error_msg)
+            # Return a meaningful error instead of raising
+            return f"[MCP服务初始化失败] {error_msg}"
 
-        # Extract service name from task description or use default
-        service_name = self._extract_service_name(task.task_desc)
+        # Step 2: Extract and validate service name
+        try:
+            service_name = self._extract_service_name(task.task_desc)
+            if not service_name or service_name == "default":
+                # Fallback to first available service
+                available_services = current_manager.get_registered_services()
+                if available_services:
+                    service_name = available_services[0]
+                    self.database.log_event(session_id, "executor", "mcp_service_fallback",
+                                           f"Using fallback service: {service_name}")
+                else:
+                    return "[MCP服务不可用] 没有注册的MCP服务"
+        except Exception as e:
+            error_msg = f"Failed to extract service name: {str(e)}"
+            self.database.log_event(session_id, "executor", "service_extraction_failed", error_msg)
+            return f"[MCP服务提取失败] {error_msg}"
 
-        self.database.log_event(session_id, "executor", "mcp_call_start",
-                               f"Task: {task.task_id}, Service: {service_name}")
-
-        # Check if service is registered
+        # Step 3: Check if service is registered
         if not current_manager.is_service_registered(service_name):
             available_services = current_manager.get_registered_services()
-            self.database.log_event(session_id, "executor", "mcp_service_not_found",
-                                   f"Service '{service_name}' not registered. Available: {available_services}")
-            raise ValueError(f"MCP service '{service_name}' not registered")
+            error_msg = f"Service '{service_name}' not registered. Available: {available_services}"
+            self.database.log_event(session_id, "executor", "mcp_service_not_found", error_msg)
+            # Try to use the first available service as fallback
+            if available_services:
+                service_name = available_services[0]
+                self.database.log_event(session_id, "executor", "mcp_service_fallback_used",
+                                       f"Using fallback service: {service_name}")
+            else:
+                return "[MCP服务不可用] 没有注册的MCP服务"
 
+        # Step 4: Extract tool name with fallback
         try:
-            # Extract tool name from task description
             tool_name = self._extract_tool_name(task.task_desc)
+            if not tool_name or tool_name == "execute":
+                # Get available tools for the service
+                tools = await current_manager.get_available_tools(service_name)
+                if service_name in tools and tools[service_name]:
+                    tool_name = tools[service_name][0].name  # Use first available tool
+                    self.database.log_event(session_id, "executor", "tool_fallback_used",
+                                           f"Using fallback tool: {tool_name}")
+                else:
+                    return f"[MCP工具不可用] 服务 '{service_name}' 没有可用工具"
+        except Exception as e:
+            error_msg = f"Failed to extract tool name: {str(e)}"
+            self.database.log_event(session_id, "executor", "tool_extraction_failed", error_msg)
+            return f"[MCP工具提取失败] {error_msg}"
 
-            # Prepare arguments for the tool call
+        # Step 5: Prepare arguments with validation
+        try:
             arguments = await self._prepare_tool_arguments(tool_name, task, input_data, user_query)
+            if not arguments:
+                arguments = {}  # Ensure arguments is not None
+        except Exception as e:
+            error_msg = f"Failed to prepare tool arguments: {str(e)}"
+            self.database.log_event(session_id, "executor", "argument_preparation_failed", error_msg)
+            arguments = {"task_desc": task.task_desc, "user_query": user_query}  # Basic fallback
 
-            self.database.log_event(session_id, "executor", "mcp_tool_call",
+        # Step 6: Execute the MCP call with comprehensive error handling
+        try:
+            self.database.log_event(session_id, "executor", "mcp_tool_call_start",
                                    f"Calling tool: {tool_name} on service: {service_name}")
 
-            # Call the tool through the unified MCP manager
             result: MCPResult = await current_manager.call_tool(
                 service_name=service_name,
                 tool_name=tool_name,
                 arguments=arguments
             )
 
-            # Log the result
+            # Step 7: Process the result
             if result.success:
                 self.database.log_event(session_id, "executor", "mcp_call_success",
                                        f"Tool {tool_name} completed in {result.execution_time:.2f}s")
-
-                # Convert MCP result to expected format (str or Dict)
-                formatted_output = self._format_mcp_result(result.data)
-                return formatted_output
+                return self._format_mcp_result(result.data)
             else:
-                # Check if this is a handled error with meaningful data
-                if result.data and isinstance(result.data, dict):
-                    if "error" in result.data and result.data["error"] in ["ContentLengthError", "JSONDecodeError", "TimeoutError"]:
-                        self.database.log_event(session_id, "executor", "mcp_handled_error",
-                                               f"Tool {tool_name} encountered handled error: {result.data['error']}")
-                        # Return the error data for the system to process
-                        formatted_output = self._format_mcp_result(result.data)
-                        return formatted_output
+                # Handle specific error types
+                error_data = result.data if isinstance(result.data, dict) else {}
+                error_type = error_data.get("error", "UnknownError")
+                error_msg = result.error or "Unknown error occurred"
 
                 self.database.log_event(session_id, "executor", "mcp_call_failed",
-                                       f"Tool {tool_name} failed: {result.error}")
-                raise Exception(f"MCP tool call failed: {result.error}")
+                                       f"Tool {tool_name} failed: {error_type} - {error_msg}")
+
+                # Handle known error types gracefully
+                if error_type in ["ContentLengthError", "JSONDecodeError", "TimeoutError"]:
+                    return self._format_mcp_result(error_data)
+                else:
+                    return f"[MCP调用失败] {error_type}: {error_msg}"
+
+        except asyncio.TimeoutError:
+            error_msg = f"MCP call timeout for tool {tool_name}"
+            self.database.log_event(session_id, "executor", "mcp_timeout", error_msg)
+            return f"[MCP调用超时] 工具 {tool_name} 调用超时"
+
+        except ConnectionError as e:
+            error_msg = f"MCP connection error: {str(e)}"
+            self.database.log_event(session_id, "executor", "mcp_connection_error", error_msg)
+            return f"[MCP连接错误] 无法连接到MCP服务: {str(e)}"
 
         except Exception as e:
-            self.database.log_event(session_id, "executor", "mcp_call_error",
-                                   f"MCP call failed: {str(e)}")
-            raise
+            error_msg = f"Unexpected MCP call error: {str(e)}"
+            self.database.log_event(session_id, "executor", "mcp_unexpected_error", error_msg)
+            # Try to provide more context if available
+            if hasattr(e, '__cause__') and e.__cause__:
+                return f"[MCP调用异常] {error_msg} (原因: {str(e.__cause__)})"
+            return f"[MCP调用异常] {error_msg}"
 
     def _extract_service_name(self, task_desc: str) -> str:
         """Extract MCP service name from task description using tool registry"""

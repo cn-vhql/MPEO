@@ -38,13 +38,23 @@ class PlannerModel:
         self.mcp_manager = mcp_manager
         await self.refresh_mcp_tools()
 
-    async def refresh_mcp_tools(self):
-        """刷新可用的MCP工具列表"""
+    async def refresh_mcp_tools(self, force_refresh: bool = False):
+        """刷新可用的MCP工具列表，支持缓存机制"""
         if not self.mcp_manager:
             return
 
         try:
+            import time
+            # 检查是否需要刷新（避免频繁刷新）
+            if not force_refresh and hasattr(self, '_tools_cache_timestamp'):
+                # 缓存5分钟，避免频繁调用
+                if time.time() - self._tools_cache_timestamp < 300:
+                    print(f"[DEBUG] Planner - Using cached MCP tools (cached {len(self.available_mcp_tools)} services)")
+                    return
+
             self.available_mcp_tools = await self.mcp_manager.get_available_tools()
+            self._tools_cache_timestamp = time.time()
+
             print(f"[DEBUG] Planner - Updated MCP tools from {len(self.available_mcp_tools)} services")
             for service_name, tools in self.available_mcp_tools.items():
                 print(f"[DEBUG] Planner - Service {service_name}: {len(tools)} tools")
@@ -52,7 +62,15 @@ class PlannerModel:
                     print(f"[DEBUG] Planner -   - {tool.name}: {tool.description}")
         except Exception as e:
             print(f"[ERROR] Planner - Failed to refresh MCP tools: {str(e)}")
-            self.available_mcp_tools = {}
+            # 保留现有缓存，不置空
+            if not hasattr(self, 'available_mcp_tools'):
+                self.available_mcp_tools = {}
+
+    def invalidate_tools_cache(self):
+        """使工具缓存失效，强制下次刷新"""
+        if hasattr(self, '_tools_cache_timestamp'):
+            delattr(self, '_tools_cache_timestamp')
+        print("[DEBUG] Planner - Tools cache invalidated")
 
     def get_tools_summary(self) -> str:
         """获取MCP工具的摘要信息，用于prompt"""
@@ -137,14 +155,21 @@ class PlannerModel:
         self.database.log_event(session_id, "planner", "start_analysis", f"Query: {user_query[:100]}...")
 
         try:
-            # Step 1: Analyze the query and extract requirements
-            analysis_result = self._analyze_query(user_query, session_id)
+            # Initialize helper classes
+            from .planner_helpers import QueryAnalyzer, TaskGenerator, DependencyGenerator
 
-            # Step 2: Generate task decomposition (now async)
-            tasks = await self._generate_tasks(analysis_result, session_id)
+            query_analyzer = QueryAnalyzer(self.client, self.model_config, self.database)
+            task_generator = TaskGenerator(self.client, self.model_config, self.database)
+            dependency_generator = DependencyGenerator(self.client, self.model_config, self.database)
+
+            # Step 1: Analyze the query and extract requirements
+            analysis_result = await query_analyzer.analyze_query(user_query, session_id)
+
+            # Step 2: Generate task decomposition
+            tasks = await task_generator.generate_tasks(analysis_result, self.available_mcp_tools, session_id)
 
             # Step 3: Generate dependencies between tasks
-            dependencies = self._generate_dependencies(tasks, analysis_result, session_id)
+            dependencies = await dependency_generator.generate_dependencies(tasks, analysis_result, session_id)
 
             # Step 4: Create task graph
             task_graph = TaskGraph(nodes=tasks, edges=dependencies)

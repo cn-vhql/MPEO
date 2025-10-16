@@ -26,22 +26,29 @@ class SystemCoordinator:
     """Main system coordinator that orchestrates all components"""
     
     def _setup_logging(self):
-        """Setup logging system with file and console output"""
+        """Setup logging system with file and console output - only once"""
         # Use the centralized logging utility
         from ..utils.logging import setup_logging
-        setup_logging(log_dir="data/logs")
-    
+        from ..utils.paths import get_project_paths
+
+        # Ensure project structure exists
+        project_paths = get_project_paths()
+        project_paths.ensure_directories()
+
+        # Setup logging with ensured directory
+        setup_logging(log_dir=str(project_paths.logs_dir))
+
     def __init__(self, config: Optional[SystemConfig] = None,
                  agent_config: Optional[MultiAgentConfig] = None,
                  agent_config_path: Optional[str] = None):
         # Load environment variables, overriding existing ones
         load_dotenv(override=True)
 
-        # Setup logging system
-        self._setup_logging()
-
-        # Initialize configuration
+        # Initialize configuration first
         self.config = config or SystemConfig()
+
+        # Setup logging system only once, after config is available
+        self._setup_logging()
 
         # Load agent configuration using unified configuration loader
         config_loader = get_config_loader()
@@ -135,59 +142,64 @@ class SystemCoordinator:
         except Exception as e:
             logging.error(f"Failed to load MCP services from database: {str(e)}")
 
+    def _create_openai_client(self, agent_name: str, agent_config) -> OpenAI:
+        """创建单个 OpenAI 客户端的工厂方法"""
+        # 获取OpenAI配置
+        openai_config = agent_config.openai_config or OpenAIApiConfig()
+
+        # 如果没有配置API密钥，尝试从环境变量获取
+        if not openai_config.api_key:
+            global_api_key = os.getenv("OPENAI_API_KEY")
+            if not global_api_key:
+                raise ValueError(f"OPENAI_API_KEY environment variable is required for {agent_name}")
+            openai_config.api_key = global_api_key
+
+        # 获取基础URL
+        if not openai_config.base_url:
+            global_base_url = os.getenv("OPENAI_API_BASE")
+            if global_base_url:
+                openai_config.base_url = global_base_url
+
+        # 获取组织ID
+        if not openai_config.organization:
+            global_organization = os.getenv("OPENAI_ORGANIZATION")
+            if global_organization:
+                openai_config.organization = global_organization
+
+        # 创建客户端
+        try:
+            client_kwargs = {
+                'api_key': openai_config.api_key,
+                'timeout': openai_config.timeout or 60,
+                'max_retries': openai_config.max_retries or 3
+            }
+
+            if openai_config.base_url:
+                client_kwargs['base_url'] = openai_config.base_url
+
+            if openai_config.organization:
+                client_kwargs['organization'] = openai_config.organization
+
+            client = OpenAI(**client_kwargs)
+
+            logging.debug(f"{agent_name} OpenAI client initialized successfully")
+            logging.debug(f"  Base URL: {openai_config.base_url or 'Default'}")
+            logging.debug(f"  Model: {agent_config.model_name}")
+
+            return client
+
+        except Exception as e:
+            logging.error(f"Failed to initialize {agent_name} OpenAI client: {str(e)}")
+            raise
+
     def _initialize_openai_clients(self) -> Dict[str, OpenAI]:
         """为每个智能体初始化独立的OpenAI客户端"""
         clients = {}
+        agent_names = ['planner', 'executor', 'output']
 
-        for agent_name in ['planner', 'executor', 'output']:
+        for agent_name in agent_names:
             agent_config = getattr(self.agent_config, agent_name)
-
-            # 获取OpenAI配置
-            openai_config = agent_config.openai_config or OpenAIApiConfig()
-
-            # 如果没有配置API密钥，尝试从环境变量获取
-            if not openai_config.api_key:
-                global_api_key = os.getenv("OPENAI_API_KEY")
-                if not global_api_key:
-                    raise ValueError(f"OPENAI_API_KEY environment variable is required for {agent_name}")
-                openai_config.api_key = global_api_key
-
-            # 获取基础URL
-            if not openai_config.base_url:
-                global_base_url = os.getenv("OPENAI_API_BASE")
-                if global_base_url:
-                    openai_config.base_url = global_base_url
-
-            # 获取组织ID
-            if not openai_config.organization:
-                global_organization = os.getenv("OPENAI_ORGANIZATION")
-                if global_organization:
-                    openai_config.organization = global_organization
-
-            # 创建客户端
-            try:
-                client_kwargs = {
-                    'api_key': openai_config.api_key,
-                    'timeout': openai_config.timeout or 60,
-                    'max_retries': openai_config.max_retries or 3
-                }
-
-                if openai_config.base_url:
-                    client_kwargs['base_url'] = openai_config.base_url
-
-                if openai_config.organization:
-                    client_kwargs['organization'] = openai_config.organization
-
-                client = OpenAI(**client_kwargs)
-                clients[agent_name] = client
-
-                logging.debug(f"{agent_name} OpenAI client initialized successfully")
-                logging.debug(f"  Base URL: {openai_config.base_url or 'Default'}")
-                logging.debug(f"  Model: {agent_config.model_name}")
-
-            except Exception as e:
-                logging.error(f"Failed to initialize {agent_name} OpenAI client: {str(e)}")
-                raise
+            clients[agent_name] = self._create_openai_client(agent_name, agent_config)
 
         return clients
     
@@ -404,8 +416,8 @@ class SystemCoordinator:
         config_loader = get_config_loader()
         config_loader.add_mcp_service(service_config)
 
-        # Refresh planner's MCP tools
-        await self.planner.refresh_mcp_tools()
+        # Refresh planner's MCP tools with force refresh since services changed
+        await self.planner.refresh_mcp_tools(force_refresh=True)
     
     def get_session_history(self, limit: int = 50) -> list[TaskSession]:
         """Get session history"""
@@ -462,13 +474,17 @@ class SystemCoordinator:
 
 class CLIInterface:
     """Command Line Interface for the system"""
-    
+
     def __init__(self):
         self.coordinator = None
         from rich.console import Console
         from rich.panel import Panel
         self.console = Console()
-    
+
+        # Initialize command registry
+        from ..interfaces.command_handlers import CommandRegistry
+        self.command_registry = CommandRegistry(self.console)
+
     def initialize(self, config: Optional[SystemConfig] = None):
         """Initialize the system coordinator"""
         try:
@@ -478,7 +494,7 @@ class CLIInterface:
         except Exception as e:
             self.console.print(f"[red]✗ 系统初始化失败: {str(e)}[/red]")
             return False
-    
+
     async def run_interactive_mode(self):
         """Run interactive CLI mode"""
         if not self.coordinator:
@@ -501,44 +517,28 @@ class CLIInterface:
                     if not user_input:
                         continue
 
-                    if user_input.lower() in ['quit', 'exit', '退出']:
-                        self.console.print("[yellow]再见！[/yellow]")
-                        # 清理资源
-                        await self.coordinator.cleanup()
+                    # Prepare context for command handlers
+                    context = {"coordinator": self.coordinator}
+
+                    # Try to handle as command
+                    result = await self.command_registry.handle_command(user_input, context)
+
+                    # Check if quit signal was received
+                    if result is True:
                         break
 
-                    if user_input.lower() in ['help', '帮助']:
-                        self._show_help()
-                        continue
-
-                    if user_input.lower() in ['status', '状态']:
-                        self._show_status()
-                        continue
-
-                    if user_input.lower() in ['history', '历史']:
-                        self._show_history()
-                        continue
-
-                    if user_input.lower() in ['logs', '日志']:
-                        self._show_logs()
-                        continue
-
-                    if user_input.startswith('config '):
-                        self._handle_config_command(user_input)
-                        continue
-
-                    if user_input.startswith('mcp '):
-                        await self._handle_mcp_command(user_input)
+                    # If command was handled, continue loop
+                    if result is not None:
                         continue
 
                     # Treat as user query
                     self.console.print(f"\n[bold]正在处理: {user_input}[/bold]")
-                    result = await self.coordinator.process_user_query(user_input)
+                    query_result = await self.coordinator.process_user_query(user_input)
 
                     # Display the result to the user
-                    if result:
+                    if query_result:
                         self.console.print(f"\n[bold green]处理结果:[/bold green]")
-                        self.console.print(result)
+                        self.console.print(query_result)
 
                 except KeyboardInterrupt:
                     self.console.print("\n[yellow]操作已中断[/yellow]")
@@ -561,96 +561,3 @@ class CLIInterface:
                     await self.coordinator.cleanup()
                 except:
                     pass
-    
-    def _show_help(self):
-        """Show help information"""
-        from rich.panel import Panel
-        help_text = """
-[bold]可用命令:[/bold]
-
-  [cyan]help/帮助[/cyan]     - 显示此帮助信息
-  [cyan]quit/exit/退出[/cyan] - 退出系统
-  [cyan]status/状态[/cyan]    - 显示系统状态
-  [cyan]history/历史[/cyan]   - 显示会话历史
-  [cyan]logs/日志[/cyan]      - 显示系统日志
-  [cyan]config set <key> <value>[/cyan] - 设置配置
-  [cyan]config get <key>[/cyan]       - 获取配置
-  [cyan]mcp register <service_name> <url>[/cyan] - 注册MCP服务
-  
-  直接输入问题即可开始处理流程
-        """
-        self.console.print(Panel(help_text, title="帮助"))
-    
-    def _show_status(self):
-        """Show system status"""
-        status = self.coordinator.get_system_status()
-        
-        # Create a simple status display
-        self.console.print(f"[bold green]系统状态:[/bold green] {status['system_status']}")
-        self.console.print(f"[bold]总会话数:[/bold] {status['total_sessions']}")
-        self.console.print(f"[bold]最近成功率:[/bold] {status['recent_success_rate']}")
-        self.console.print(f"[bold]注册的MCP服务:[/bold] {status['registered_mcp_services']}")
-    
-    def _show_history(self):
-        """Show session history"""
-        sessions = self.coordinator.get_session_history(limit=10)
-        
-        if not sessions:
-            self.console.print("[yellow]暂无会话历史[/yellow]")
-            return
-        
-        self.console.print("[bold]最近的会话:[/bold]")
-        for session in sessions:
-            status_color = "green" if session.status == "completed" else "red"
-            self.console.print(f"  {session.session_id[:8]}... [{status_color}]{session.status}[/{status_color}] - {session.user_query[:50]}...")
-    
-    def _show_logs(self):
-        """Show system logs"""
-        logs = self.coordinator.get_system_logs(limit=20)
-        
-        if not logs:
-            self.console.print("[yellow]暂无日志[/yellow]")
-            return
-        
-        self.console.print("[bold]系统日志:[/bold]")
-        for log in logs:
-            self.console.print(f"  {log['timestamp']} - {log['component']}: {log['operation']}")
-    
-    def _handle_config_command(self, command: str):
-        """Handle configuration commands"""
-        parts = command.split()
-        if len(parts) < 2:
-            self.console.print("[red]用法: config <get|set> <key> [value][/red]")
-            return
-        
-        action = parts[1]
-        if action == "get" and len(parts) >= 3:
-            key = parts[2]
-            value = getattr(self.coordinator.config, key, "未找到")
-            self.console.print(f"{key}: {value}")
-        elif action == "set" and len(parts) >= 4:
-            key = parts[2]
-            value = parts[3]
-            self.coordinator.update_config(**{key: value})
-            self.console.print(f"[green]✓ {key} 已设置为 {value}[/green]")
-        else:
-            self.console.print("[red]用法错误[/red]")
-    
-    async def _handle_mcp_command(self, command: str):
-        """Handle MCP service commands"""
-        parts = command.split()
-        if len(parts) < 4 or parts[1] != "register":
-            self.console.print("[red]用法: mcp register <service_name> <url>[/red]")
-            return
-
-        service_name = parts[2]
-        service_url = parts[3]
-
-        mcp_config = MCPServiceConfig(
-            service_name=service_name,
-            endpoint_url=service_url,
-            timeout=30
-        )
-
-        await self.coordinator.register_mcp_service(mcp_config)
-        self.console.print(f"[green]✓ MCP服务 '{service_name}' 已注册[/green]")

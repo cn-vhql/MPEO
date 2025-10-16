@@ -254,22 +254,34 @@ class DatabaseManager:
                 ))
                 conn.commit()
         except Exception as e:
-            print(f"Failed to log event: {str(e)}")
+            # Use log_error method to maintain consistency
+            self.log_error("database", f"Failed to log event: {str(e)}")
     
     def log_error(self, component: str, message: str):
-        """Log error message"""
-        self.log_event(None, component, "ERROR", message)
-    
+        """Log error message using unified logging"""
+        try:
+            # Use the centralized logging utility
+            from ..utils.logging import get_logger
+            logger = get_logger("database")
+            logger.error(f"[{component}] {message}")
+
+            # Also store in database for persistence
+            self.log_event(None, component, "ERROR", message)
+        except Exception as e:
+            # Fallback to print if logging system fails
+            print(f"[{component}] {message}")
+            print(f"Logging system error: {str(e)}")
+
     def get_logs(self, session_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Get system logs"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                
+
                 if session_id:
                     cursor.execute('''
                         SELECT session_id, component, operation, details, timestamp
-                        FROM logs 
+                        FROM logs
                         WHERE session_id = ?
                         ORDER BY timestamp DESC
                         LIMIT ?
@@ -277,11 +289,11 @@ class DatabaseManager:
                 else:
                     cursor.execute('''
                         SELECT session_id, component, operation, details, timestamp
-                        FROM logs 
+                        FROM logs
                         ORDER BY timestamp DESC
                         LIMIT ?
                     ''', (limit,))
-                
+
                 rows = cursor.fetchall()
                 return [
                     {
