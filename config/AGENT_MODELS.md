@@ -223,18 +223,19 @@ python main.py
 ```bash
 # 查看可用预设
 python -c "
-from mpeo.utils.config import list_available_presets
-presets = list_available_presets()
-for name, desc in presets.items():
-    print(f'{name}: {desc}')
+from mpeo.services import get_config_loader
+loader = get_config_loader()
+# 注意：预设功能将在未来版本中实现
+print('预设功能即将推出')
 "
 
-# 在代码中使用预设
-from mpeo.utils.config import load_agent_preset
+# 在代码中直接使用配置加载器
+from mpeo.services import get_config_loader
 from mpeo.core.coordinator import SystemCoordinator
 
-# 加载高质量预设
-agent_config = load_agent_preset('high_quality')
+# 加载智能体配置
+config_loader = get_config_loader()
+agent_config = config_loader.load_agent_config()
 coordinator = SystemCoordinator(agent_config=agent_config)
 ```
 

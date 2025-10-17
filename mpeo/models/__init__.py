@@ -13,6 +13,7 @@ from .task import (
 )
 from .session import TaskSession
 from .config import SystemConfig, MCPServiceConfig
+from .agent_config import AgentModelConfig
 
 __all__ = [
     # Task models
@@ -30,5 +31,6 @@ __all__ = [
 
     # Config models
     "SystemConfig",
-    "MCPServiceConfig"
+    "MCPServiceConfig",
+    "AgentModelConfig"
 ]

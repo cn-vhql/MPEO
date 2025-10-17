@@ -10,7 +10,7 @@ MPEO 服务模块
 
 from .database import DatabaseManager
 from .unified_mcp_manager import UnifiedMCPManager
-from .configuration_loader import get_config_loader
+from .configuration_loader import get_config_loader, AgentScopeConfig
 
 # 为了向后兼容，保留原有的导入路径
 from .mcp_common import MCPTool, MCPResult, MCPConnectionConfig
@@ -19,6 +19,7 @@ __all__ = [
     "DatabaseManager",
     "UnifiedMCPManager",
     "get_config_loader",
+    "AgentScopeConfig",
     "MCPTool",
     "MCPResult",
     "MCPConnectionConfig"

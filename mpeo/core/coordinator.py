@@ -40,12 +40,17 @@ class SystemCoordinator:
 
     def __init__(self, config: Optional[SystemConfig] = None,
                  agent_config: Optional[MultiAgentConfig] = None,
-                 agent_config_path: Optional[str] = None):
+                 agent_config_path: Optional[str] = None,
+                 openai_client: Optional[OpenAI] = None,
+                 planner_config=None,
+                 executor_config=None,
+                 enable_agentscope: bool = False):
         # Load environment variables, overriding existing ones
         load_dotenv(override=True)
 
         # Initialize configuration first
         self.config = config or SystemConfig()
+        self.enable_agentscope = enable_agentscope
 
         # Setup logging system only once, after config is available
         self._setup_logging()
@@ -66,8 +71,15 @@ class SystemCoordinator:
             self.config.openai_model = openai_model
             logging.debug(f"Overriding model from environment: {openai_model}")
 
-        # Initialize OpenAI clients for each agent
-        self.openai_clients = self._initialize_openai_clients()
+        # Use provided OpenAI client or initialize OpenAI clients
+        if openai_client:
+            self.openai_clients = {
+                'planner': openai_client,
+                'executor': openai_client,
+                'output': openai_client
+            }
+        else:
+            self.openai_clients = self._initialize_openai_clients()
 
         # Initialize database
         self.database = DatabaseManager(self.config.database_path)
@@ -75,7 +87,64 @@ class SystemCoordinator:
         # Initialize MCP service manager
         self.mcp_manager = UnifiedMCPManager()
 
-        # Initialize components with individual model configurations and clients
+        # Initialize components with support for AgentScope
+        if enable_agentscope:
+            # Try to use AgentScope components if available
+            try:
+                # Use unified planner with AgentScope support
+                self.planner = PlannerModel(
+                    openai_client=self.openai_clients['planner'],
+                    database=self.database,
+                    model_config=planner_config or self.agent_config.planner,
+                    enable_agentscope=True
+                )
+
+                # Try to use AgentScope executor if available
+                try:
+                    from .executor_agentscope import AgentScopeTaskExecutor
+                    self.executor = AgentScopeTaskExecutor(
+                        openai_client=self.openai_clients['executor'],
+                        database=self.database,
+                        config=self.config,
+                        model_config=executor_config or self.agent_config.executor,
+                        enable_agentscope=True
+                    )
+                except ImportError:
+                    # Fallback to legacy executor
+                    self.executor = TaskExecutor(
+                        self.openai_clients['executor'],
+                        self.database,
+                        self.config,
+                        self.agent_config.executor
+                    )
+                    logging.info("Using legacy executor with AgentScope planner")
+
+                logging.info("AgentScope components initialized successfully")
+
+            except Exception as e:
+                logging.warning(f"Failed to initialize AgentScope components, falling back to legacy: {str(e)}")
+                self.enable_agentscope = False
+                self._initialize_legacy_components()
+        else:
+            self._initialize_legacy_components()
+
+        # Initialize output model (always use legacy for now)
+        self.output_model = OutputModel(
+            self.openai_clients['output'],
+            self.database,
+            self.agent_config.output
+        )
+
+        self.interface = HumanFeedbackInterface(self.database)
+
+        # Load configuration from database
+        self._load_configuration()
+
+        # Note: MCP manager will be initialized when needed (lazy initialization)
+        self._mcp_manager_initialized = False
+
+    def _initialize_legacy_components(self):
+        """Initialize traditional components"""
         self.planner = PlannerModel(
             self.openai_clients['planner'],
             self.database,
@@ -87,18 +156,11 @@ class SystemCoordinator:
             self.config,
             self.agent_config.executor
         )
-        self.output_model = OutputModel(
-            self.openai_clients['output'],
-            self.database,
-            self.agent_config.output
-        )
-        self.interface = HumanFeedbackInterface(self.database)
 
-        # Load configuration from database
-        self._load_configuration()
-
-        # Note: MCP manager will be initialized when needed (lazy initialization)
-        self._mcp_manager_initialized = False
+    async def set_mcp_manager(self, mcp_manager):
+        """Set MCP manager and update components"""
+        self.mcp_manager = mcp_manager
+        await self._ensure_mcp_manager_initialized()
 
     async def cleanup(self):
         """Cleanup resources"""
@@ -482,11 +544,25 @@ class CLIInterface:
         from ..interfaces.command_handlers import CommandRegistry
         self.command_registry = CommandRegistry(self.console)
 
-    def initialize(self, config: Optional[SystemConfig] = None):
-        """Initialize the system coordinator"""
+    def initialize(self, config: Optional[SystemConfig] = None,
+                 openai_client: Optional[OpenAI] = None,
+                 planner_config=None,
+                 executor_config=None,
+                 enable_agentscope: bool = False):
+        """Initialize the system coordinator with AgentScope support"""
         try:
-            self.coordinator = SystemCoordinator(config)
-            self.console.print("[green]✓ 系统初始化成功[/green]")
+            self.coordinator = SystemCoordinator(
+                config=config,
+                openai_client=openai_client,
+                planner_config=planner_config,
+                executor_config=executor_config,
+                enable_agentscope=enable_agentscope
+            )
+
+            if enable_agentscope and self.coordinator.enable_agentscope:
+                self.console.print("[green]✓ 系统初始化成功 (AgentScope模式)[/green]")
+            else:
+                self.console.print("[green]✓ 系统初始化成功 (传统模式)[/green]")
             return True
         except Exception as e:
             self.console.print(f"[red]✗ 系统初始化失败: {str(e)}[/red]")
