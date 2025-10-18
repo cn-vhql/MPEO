@@ -8,14 +8,15 @@ MPEO 核心模块
 - output: 输出处理器
 """
 
-from .coordinator import SystemCoordinator, CLIInterface
+from .coordinator import SystemCoordinator
+from .cli import NewCLIInterface
 from .planner import PlannerModel
 from .executor import TaskExecutor
 from .output import OutputModel
 
 __all__ = [
     "SystemCoordinator",
-    "CLIInterface",
+    "NewCLIInterface",
     "PlannerModel",
     "TaskExecutor",
     "OutputModel"

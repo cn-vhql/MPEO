@@ -1,6 +1,6 @@
 """
 统一配置加载器 - 简化配置管理逻辑
-整合所有配置相关的加载和管理功能，包括AgentScope配置
+整合所有配置相关的加载和管理功能
 """
 
 import json
@@ -16,21 +16,6 @@ from ..models.agent_config import MultiAgentConfig, AgentModelConfig, OpenAIApiC
 from ..utils.logging import get_logger
 
 
-@dataclass
-class AgentScopeConfig:
-    """AgentScope配置"""
-    enabled: bool = True
-    project_name: str = "MPEO-Enhanced"
-    model_integration: Dict[str, Any] = None
-    compatibility: Dict[str, Any] = None
-
-    def __post_init__(self):
-        if self.model_integration is None:
-            self.model_integration = {}
-        if self.compatibility is None:
-            self.compatibility = {}
-
-
 class ConfigurationLoader:
     """统一配置加载器，处理所有配置相关的操作"""
 
@@ -39,7 +24,6 @@ class ConfigurationLoader:
         self._system_config: Optional[SystemConfig] = None
         self._agent_config: Optional[MultiAgentConfig] = None
         self._mcp_services: Dict[str, MCPServiceConfig] = {}
-        self._agentscope_config: Optional[AgentScopeConfig] = None
 
     def load_system_config(self, config_path: Optional[str] = None) -> SystemConfig:
         """加载系统配置"""
@@ -303,144 +287,11 @@ class ConfigurationLoader:
 
         return agent_config
 
-    def load_agentscope_config(self, config_path: Optional[str] = None) -> AgentScopeConfig:
-        """加载AgentScope配置"""
-        if self._agentscope_config is not None:
-            return self._agentscope_config
-
-        try:
-            if config_path is None:
-                # 默认配置路径
-                base_dir = Path(__file__).parent.parent.parent
-                config_path = base_dir / "config" / "agentscope_config.json"
-
-            config_path = Path(config_path)
-
-            if config_path.exists():
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config_data = json.load(f)
-
-                agentscope_data = config_data.get("agentscope", {})
-                self._agentscope_config = AgentScopeConfig(
-                    enabled=agentscope_data.get("enabled", True),
-                    project_name=agentscope_data.get("project_name", "MPEO-Enhanced"),
-                    model_integration=config_data.get("model_integration", {}),
-                    compatibility=config_data.get("compatibility", {})
-                )
-                self.logger.info(f"Loaded AgentScope config from {config_path}")
-            else:
-                # 创建默认配置
-                self._agentscope_config = self._get_default_agentscope_config()
-                self.logger.info("Using default AgentScope config")
-
-            return self._agentscope_config
-
-        except Exception as e:
-            self.logger.error(f"Failed to load AgentScope config: {str(e)}")
-            # 返回默认配置作为后备
-            self._agentscope_config = self._get_default_agentscope_config()
-            return self._agentscope_config
-
-    def _get_default_agentscope_config(self) -> AgentScopeConfig:
-        """获取默认AgentScope配置"""
-        return AgentScopeConfig(
-            enabled=True,
-            project_name="MPEO-Enhanced",
-            model_integration={
-                "openai": {
-                    "enabled": True,
-                    "model_mapping": {
-                        "planner": "gpt-4",
-                        "executor": "gpt-3.5-turbo",
-                        "default": "gpt-3.5-turbo"
-                    },
-                    "config_overrides": {
-                        "planner": {
-                            "temperature": 0.3,
-                            "max_tokens": 2000
-                        },
-                        "executor": {
-                            "temperature": 0.2,
-                            "max_tokens": 1500
-                        }
-                    }
-                }
-            },
-            compatibility={
-                "fallback_to_legacy": True,
-                "legacy_mode_threshold": 3,
-                "error_recovery": {
-                    "enable_graceful_degradation": True,
-                    "retry_legacy_on_failure": True,
-                    "log_degradation_events": True
-                }
-            }
-        )
-
-    def save_agentscope_config(self, config: AgentScopeConfig, config_path: Optional[str] = None) -> bool:
-        """保存AgentScope配置"""
-        try:
-            if config_path is None:
-                # 默认配置路径
-                base_dir = Path(__file__).parent.parent.parent
-                config_path = base_dir / "config" / "agentscope_config.json"
-
-            config_path = Path(config_path)
-
-            # 确保目录存在
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # 转换为字典
-            config_dict = {
-                "agentscope": {
-                    "enabled": config.enabled,
-                    "project_name": config.project_name
-                },
-                "model_integration": config.model_integration,
-                "compatibility": config.compatibility
-            }
-
-            # 写入文件
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_dict, f, indent=2, ensure_ascii=False)
-
-            self.logger.info(f"Saved AgentScope config to {config_path}")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to save AgentScope config: {str(e)}")
-            return False
-
-    def get_model_mapping(self) -> Dict[str, str]:
-        """获取AgentScope模型映射配置"""
-        agentscope_config = self.load_agentscope_config()
-        if (agentscope_config.model_integration and
-            "openai" in agentscope_config.model_integration):
-            return agentscope_config.model_integration["openai"].get("model_mapping", {})
-        return {}
-
-    def is_agentscope_enabled(self) -> bool:
-        """检查AgentScope是否启用"""
-        try:
-            # 检查AgentScope是否安装
-            import agentscope
-            agentscope_available = True
-        except ImportError:
-            agentscope_available = False
-
-        if not agentscope_available:
-            return False
-
-        # 检查配置是否启用
-        agentscope_config = self.load_agentscope_config()
-        return agentscope_config.enabled
-
     def reload_configs(self):
         """重新加载所有配置"""
         self._system_config = None
         self._agent_config = None
         self._mcp_services = {}
-        self._agentscope_config = None
         self.logger.info("All configurations reset and will be reloaded on next access")
 
     def validate_configs(self) -> Dict[str, Any]:
