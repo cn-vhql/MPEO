@@ -1,5 +1,5 @@
 """
-Planner Model - Task decomposition and DAG generation with AgentScope support
+Planner Model - Task decomposition and DAG generation
 """
 
 import json
@@ -10,31 +10,13 @@ from ..models import TaskGraph, TaskNode, TaskEdge, TaskType, DependencyType
 from ..models.agent_config import AgentModelConfig
 from ..services.database import DatabaseManager
 from ..services.unified_mcp_manager import UnifiedMCPManager, MCPTool
-from ..services.agentscope_mcp_adapter import AgentScopeMCPAdapter
-
-# AgentScope imports
-try:
-    from agentscope.agents import ReActAgent
-    from agentscope.models import OpenAIChatModel
-    from agentscope.message import Msg
-    from agentscope.memory import InMemoryMemory
-    from agentscope.tool import Toolkit
-    from agentscope import init as agentscope_init
-    AGENTSCOPE_AVAILABLE = True
-except ImportError:
-    AGENTSCOPE_AVAILABLE = False
-    ReActAgent = None
-    OpenAIChatModel = None
-    Msg = None
-    InMemoryMemory = None
-    Toolkit = None
 
 
 class PlannerModel:
-    """Planner model for task decomposition and DAG generation with AgentScope support"""
+    """Planner model for task decomposition and DAG generation"""
 
     def __init__(self, openai_client: OpenAI, database: DatabaseManager,
-                 model_config: AgentModelConfig = None, enable_agentscope: bool = True):
+                 model_config: Optional[AgentModelConfig] = None):
         self.client = openai_client
         self.database = database
         self.model_config = model_config or AgentModelConfig(
@@ -46,42 +28,6 @@ class PlannerModel:
         self.mcp_manager: Optional[UnifiedMCPManager] = None
         self.available_mcp_tools: Dict[str, List[MCPTool]] = {}
 
-        # AgentScope相关
-        self.enable_agentscope = enable_agentscope and AGENTSCOPE_AVAILABLE
-        self.agentscope_adapter: Optional[AgentScopeMCPAdapter] = None
-        self.planner_agent: Optional[ReActAgent] = None
-        self.agentscope_model = None
-        self.memory = None
-
-        if self.enable_agentscope:
-            self._initialize_agentscope()
-
-    def _initialize_agentscope(self):
-        """初始化AgentScope组件"""
-        try:
-            if not AGENTSCOPE_AVAILABLE:
-                raise ImportError("AgentScope is not installed")
-
-            # 创建OpenAI模型包装器
-            self.agentscope_model = OpenAIChatModel(
-                model_name=self.model_config.model_name,
-                api_key=self.client.api_key,
-                organization_id=getattr(self.client, 'organization', None),
-                temperature=self.model_config.temperature,
-                max_tokens=self.model_config.max_tokens
-            )
-
-            # 创建记忆系统
-            self.memory = InMemoryMemory()
-
-            self.database.log_event("", "planner", "agentscope_initialized",
-                                   f"AgentScope planner initialized with model: {self.model_config.model_name}")
-
-        except Exception as e:
-            self.database.log_event("", "planner", "agentscope_init_failed",
-                                   f"Failed to initialize AgentScope: {str(e)}")
-            self.enable_agentscope = False
-
     @property
     def model_name(self) -> str:
         """获取模型名称"""
@@ -90,30 +36,11 @@ class PlannerModel:
     async def set_mcp_manager(self, mcp_manager: UnifiedMCPManager):
         """设置MCP服务管理器"""
         self.mcp_manager = mcp_manager
-
-        if self.enable_agentscope:
-            # 初始化AgentScope适配器
-            try:
-                self.agentscope_adapter = AgentScopeMCPAdapter(mcp_manager)
-                await self.agentscope_adapter.initialize()
-
-                # 创建规划智能体
-                await self._create_planner_agent()
-
-                self.database.log_event("", "planner", "agentscope_adapter_initialized",
-                                       f"AgentScope adapter initialized with {len(self.agentscope_adapter.tool_functions)} tools")
-
-            except Exception as e:
-                self.database.log_event("", "planner", "agentscope_adapter_init_failed",
-                                       f"Failed to initialize AgentScope adapter: {str(e)}")
-                # 降级到传统模式
-                self.enable_agentscope = False
-
-        # 兼容性：刷新传统MCP工具缓存
+        # 刷新传统MCP工具缓存
         await self.refresh_mcp_tools()
 
     async def refresh_mcp_tools(self, force_refresh: bool = False):
-        """刷新可用的MCP工具列表，支持AgentScope和传统模式"""
+        """刷新可用的MCP工具列表"""
         if not self.mcp_manager:
             return
 
@@ -125,15 +52,8 @@ class PlannerModel:
                 if time.time() - self._tools_cache_timestamp < 300:  # 5分钟缓存
                     return
 
-            # AgentScope模式：刷新适配器
-            if self.enable_agentscope and self.agentscope_adapter:
-                await self.agentscope_adapter.refresh_tools()
-                # 转换为传统格式以保持兼容性
-                self._convert_agentscope_tools_to_legacy_format()
-
-            # 传统模式：直接获取MCP工具
-            else:
-                self.available_mcp_tools = await self.mcp_manager.get_available_tools()
+            # 获取MCP工具
+            self.available_mcp_tools = await self.mcp_manager.get_available_tools()
 
             self._tools_cache_timestamp = time.time()
 
@@ -142,97 +62,10 @@ class PlannerModel:
             if not hasattr(self, 'available_mcp_tools'):
                 self.available_mcp_tools = {}
 
-    def _convert_agentscope_tools_to_legacy_format(self):
-        """将AgentScope工具转换为传统格式以保持兼容性"""
-        if not self.agentscope_adapter:
-            return
-
-        try:
-            self.available_mcp_tools = {}
-
-            # 按服务名分组工具
-            for tool_name, tool_func in self.agentscope_adapter.tool_functions.items():
-                service_name = tool_func.service_name
-
-                if service_name not in self.available_mcp_tools:
-                    self.available_mcp_tools[service_name] = []
-
-                # 创建兼容的工具对象
-                legacy_tool = LegacyMCPTool(
-                    name=tool_func.mcp_tool.name,
-                    description=tool_func.mcp_tool.description,
-                    input_schema=tool_func.mcp_tool.input_schema
-                )
-
-                self.available_mcp_tools[service_name].append(legacy_tool)
-
-        except Exception as e:
-            self.database.log_event("", "planner", "tool_conversion_failed",
-                                   f"Failed to convert AgentScope tools: {str(e)}")
-
     def invalidate_tools_cache(self):
         """使工具缓存失效，强制下次刷新"""
         if hasattr(self, '_tools_cache_timestamp'):
             delattr(self, '_tools_cache_timestamp')
-
-        # 清空AgentScope适配器缓存
-        if self.agentscope_adapter:
-            self.agentscope_adapter.clear_cache()
-
-    async def _create_planner_agent(self):
-        """创建AgentScope规划智能体"""
-        if not self.enable_agentscope or not self.agentscope_adapter:
-            return
-
-        try:
-            # 创建工具包
-            toolkit = await self.agentscope_adapter.create_contextual_toolkit("任务规划工具发现")
-
-            # 创建ReAct智能体
-            self.planner_agent = ReActAgent(
-                name="MPEO规划师",
-                sys_prompt=self._get_planning_system_prompt(),
-                model=self.agentscope_model,
-                memory=self.memory,
-                toolkit=toolkit,
-                max_iters=3  # 限制迭代次数，提高效率
-            )
-
-            self.database.log_event("", "planner", "planner_agent_created", "AgentScope planner agent created")
-
-        except Exception as e:
-            self.database.log_event("", "planner", "planner_agent_creation_failed",
-                                   f"Failed to create planner agent: {str(e)}")
-            raise
-
-    def _get_planning_system_prompt(self) -> str:
-        """获取规划智能体的系统提示"""
-        return """
-你是一个专业的AI任务规划专家，专门负责将复杂的用户需求分解为可执行的任务图。
-
-你的主要职责：
-1. 分析用户需求，理解核心目标和约束条件
-2. 发现和评估可用的MCP工具
-3. 将需求分解为具体的、可执行的任务
-4. 定义任务间的依赖关系，确保执行顺序合理
-5. 生成结构化的任务图（DAG）
-
-工具使用指导：
-- 使用工具发现功能来了解当前可用的MCP服务
-- 根据任务需求选择合适的工具
-- 在任务描述中明确指定使用的服务名和工具名
-- 确保任务描述具体、可执行
-
-任务分解原则：
-1. 任务粒度适中，每个任务可独立完成
-2. 优先使用MCP工具处理外部数据获取
-3. 合理设置任务优先级（1-5，数字越大优先级越高）
-4. 避免循环依赖
-5. 确保任务覆盖完整需求
-
-输出格式：
-严格按照JSON格式输出任务列表和依赖关系。
-"""
 
     def get_tools_summary(self) -> str:
         """获取MCP工具的摘要信息，用于prompt"""
@@ -305,30 +138,19 @@ class PlannerModel:
     
     async def analyze_and_decompose(self, user_query: str, session_id: str) -> TaskGraph:
         """
-        使用AgentScope进行需求分析和任务分解
+        分析用户需求并进行任务分解
         """
         self.database.log_event(session_id, "planner", "start_analysis", f"Query: {user_query[:100]}...")
 
         try:
-            # 优先使用AgentScope智能体
-            if self.enable_agentscope and self.planner_agent:
-                return await self._agentscope_analyze_and_decompose(user_query, session_id)
-            else:
-                # 降级到传统方式
-                return await self._legacy_analyze_and_decompose(user_query, session_id)
+            return await self._analyze_and_decompose(user_query, session_id)
 
         except Exception as e:
             self.database.log_event(session_id, "planner", "analysis_error", f"Analysis failed: {str(e)}")
-            # 如果AgentScope失败，尝试传统方式
-            if self.enable_agentscope:
-                self.database.log_event(session_id, "planner", "fallback_to_legacy",
-                                       "Falling back to legacy planning method")
-                return await self._legacy_analyze_and_decompose(user_query, session_id)
-            else:
-                raise
-
-    async def _legacy_analyze_and_decompose(self, user_query: str, session_id: str) -> TaskGraph:
-        """传统的需求分析和任务分解（向后兼容）"""
+            raise
+    
+    async def _analyze_and_decompose(self, user_query: str, session_id: str) -> TaskGraph:
+        """需求分析和任务分解"""
         try:
             # Initialize helper classes
             from .planner_helpers import QueryAnalyzer, TaskGenerator, DependencyGenerator
@@ -414,10 +236,13 @@ class PlannerModel:
             )
             print(f"[DEBUG] Planner - API call successful, response status: {response.choices[0].finish_reason if response.choices else 'No choices'}")
             
-            analysis_text = response.choices[0].message.content
-            print(f"[DEBUG] Planner - Analysis response length: {len(analysis_text)} characters")
-            print(f"[DEBUG] Planner - Analysis preview: {analysis_text[:100]}...")
-            self.database.log_event(session_id, "planner", "query_analyzed", f"Analysis: {analysis_text[:200]}...")
+            if response.choices and response.choices[0].message.content:
+                analysis_text = response.choices[0].message.content
+                print(f"[DEBUG] Planner - Analysis response length: {len(analysis_text)} characters")
+                print(f"[DEBUG] Planner - Analysis preview: {analysis_text[:100]}...")
+                self.database.log_event(session_id, "planner", "query_analyzed", f"Analysis: {analysis_text[:200]}...")
+            else:
+                raise ValueError("No response content from API")
             
         except Exception as e:
             print(f"[ERROR] Planner - API call failed: {str(e)}")
@@ -539,10 +364,13 @@ class PlannerModel:
             )
             print(f"[DEBUG] Planner - Task generation API call successful")
             
-            response_text = response.choices[0].message.content
-            print(f"[DEBUG] Planner - Task generation response length: {len(response_text)} characters")
-            print(f"[DEBUG] Planner - Task generation preview: {response_text[:100]}...")
-            self.database.log_event(session_id, "planner", "tasks_generated", f"Generated tasks: {response_text[:200]}...")
+            if response.choices and response.choices[0].message.content:
+                response_text = response.choices[0].message.content
+                print(f"[DEBUG] Planner - Task generation response length: {len(response_text)} characters")
+                print(f"[DEBUG] Planner - Task generation preview: {response_text[:100]}...")
+                self.database.log_event(session_id, "planner", "tasks_generated", f"Generated tasks: {response_text[:200]}...")
+            else:
+                raise ValueError("No response content from API")
             
         except Exception as e:
             print(f"[ERROR] Planner - Task generation API call failed: {str(e)}")
@@ -637,8 +465,11 @@ class PlannerModel:
             presence_penalty=self.model_config.presence_penalty
         )
         
-        response_text = response.choices[0].message.content
-        self.database.log_event(session_id, "planner", "dependencies_generated", f"Generated dependencies: {response_text[:200]}...")
+        if response.choices and response.choices[0].message.content:
+            response_text = response.choices[0].message.content
+            self.database.log_event(session_id, "planner", "dependencies_generated", f"Generated dependencies: {response_text[:200]}...")
+        else:
+            raise ValueError("No response content from API")
         
         try:
             # Extract JSON from response
@@ -730,180 +561,10 @@ class PlannerModel:
 
         return TaskGraph(nodes=tasks, edges=dependencies)
 
-    # AgentScope增强的分析和分解方法
-    async def _agentscope_analyze_and_decompose(self, user_query: str, session_id: str) -> TaskGraph:
-        """使用AgentScope智能体进行分析和分解"""
-        try:
-            # 确保工具是最新的
-            await self.refresh_mcp_tools()
-
-            # 创建上下文工具包
-            contextual_toolkit = await self.agentscope_adapter.create_contextual_toolkit(user_query)
-
-            # 更新智能体的工具包
-            self.planner_agent.toolkit = contextual_toolkit
-
-            # 构建规划提示
-            planning_prompt = self._build_planning_prompt(user_query)
-
-            # 创建输入消息
-            input_msg = Msg(
-                name="user",
-                content=planning_prompt,
-                role="user"
-            )
-
-            # 调用AgentScope智能体
-            response = await self.planner_agent.reply(input_msg)
-
-            # 解析响应并生成任务图
-            task_graph = await self._parse_agentscope_response(response.content, user_query, session_id)
-
-            # 验证任务图
-            if task_graph.has_cycle():
-                self.database.log_event(session_id, "planner", "cycle_detected", "Generated DAG has cycles, regenerating...")
-                return await self._regenerate_graph(user_query, session_id)
-
-            self.database.log_event(session_id, "planner", "agentscope_graph_generated",
-                                   f"Generated {len(task_graph.nodes)} tasks with {len(task_graph.edges)} dependencies")
-
-            return task_graph
-
-        except Exception as e:
-            self.database.log_event(session_id, "planner", "agentscope_planning_failed",
-                                   f"AgentScope planning failed: {str(e)}")
-            raise
-
-    def _build_planning_prompt(self, user_query: str) -> str:
-        """构建规划提示"""
-        tools_summary = self.get_tools_summary()
-
-        return f"""
-请为以下用户查询生成详细的任务执行计划：
-
-用户查询：{user_query}
-
-当前可用的MCP工具：
-{tools_summary}
-
-请按照以下步骤进行分析和规划：
-
-1. **需求分析**：理解用户的核心目标、约束条件和预期输出
-2. **工具评估**：使用工具发现功能了解当前可用的MCP服务，评估哪些工具对完成任务有帮助
-3. **任务分解**：将复杂需求分解为具体的、可执行的任务
-4. **依赖分析**：定义任务间的逻辑依赖关系
-5. **输出格式化**：生成标准的JSON格式任务图
-
-输出要求：
-- 严格按照JSON格式输出
-- 任务描述要具体明确，包含使用的服务名和工具名
-- 合理设置优先级（1-5，数字越大优先级越高）
-- 确保任务间依赖关系合理，避免循环依赖
-
-JSON输出格式：
-{{
-    "analysis": {{
-        "core_objective": "核心目标",
-        "domain": "领域类型",
-        "complexity": "复杂度",
-        "key_requirements": ["需求1", "需求2"]
-    }},
-    "tasks": [
-        {{
-            "task_id": "T1",
-            "task_desc": "具体任务描述，包含使用的MCP服务名和工具名",
-            "task_type": "任务类型（本地计算/mcp调用/数据处理）",
-            "expected_output": "预期输出",
-            "priority": 3
-        }}
-    ],
-    "dependencies": [
-        {{
-            "from_task_id": "前置任务ID",
-            "to_task_id": "依赖任务ID",
-            "dependency_type": "依赖类型（数据依赖/结果依赖）"
-        }}
-    ]
-}}
-
-重要提醒：
-1. 请先使用工具发现功能查看当前可用的MCP服务
-2. 在任务描述中明确指出使用的MCP服务名和工具名
-3. 确保任务描述与可用工具匹配
-4. 对于fetch工具，必须在任务描述中包含完整的URL地址
-"""
-
-    async def _parse_agentscope_response(self, response_content: str, user_query: str, session_id: str) -> TaskGraph:
-        """解析AgentScope智能体的响应"""
-        try:
-            # 提取JSON部分
-            json_start = response_content.find('{')
-            json_end = response_content.rfind('}') + 1
-
-            if json_start == -1 or json_end <= json_start:
-                raise ValueError("No valid JSON found in response")
-
-            json_content = response_content[json_start:json_end]
-            data = json.loads(json_content)
-
-            # 提取任务列表
-            tasks_data = data.get("tasks", [])
-            tasks = []
-
-            for i, task_data in enumerate(tasks_data):
-                task_node = TaskNode(
-                    task_id=task_data.get("task_id", f"T{i+1}"),
-                    task_desc=task_data.get("task_desc", f"任务{i+1}"),
-                    task_type=TaskType(task_data.get("task_type", "本地计算")),
-                    expected_output=task_data.get("expected_output", "完成处理"),
-                    priority=task_data.get("priority", 3)
-                )
-                tasks.append(task_node)
-
-            # 提取依赖关系
-            deps_data = data.get("dependencies", [])
-            dependencies = []
-
-            for dep_data in deps_data:
-                try:
-                    task_edge = TaskEdge(
-                        from_task_id=dep_data.get("from_task_id"),
-                        to_task_id=dep_data.get("to_task_id"),
-                        dependency_type=DependencyType(dep_data.get("dependency_type", "结果依赖"))
-                    )
-                    dependencies.append(task_edge)
-                except (ValueError, KeyError):
-                    # 跳过无效依赖
-                    continue
-
-            # 创建任务图
-            task_graph = TaskGraph(nodes=tasks, edges=dependencies)
-
-            self.database.log_event(session_id, "planner", "agentscope_response_parsed",
-                                   f"Parsed {len(tasks)} tasks and {len(dependencies)} dependencies")
-
-            return task_graph
-
-        except json.JSONDecodeError as e:
-            self.database.log_event(session_id, "planner", "agentscope_json_parse_error",
-                                   f"Failed to parse JSON: {str(e)}")
-            raise ValueError(f"Invalid JSON in AgentScope response: {str(e)}")
-        except Exception as e:
-            self.database.log_event(session_id, "planner", "agentscope_response_parse_error",
-                                   f"Failed to parse response: {str(e)}")
-            raise
-
     async def cleanup(self):
         """清理资源"""
         try:
-            if self.agentscope_adapter:
-                await self.agentscope_adapter.close()
-                self.agentscope_adapter = None
-
-            self.planner_agent = None
-            self.memory = None
-
-            self.database.log_event("", "planner", "cleanup_completed", "AgentScope planner cleaned up")
+            self.database.log_event("", "planner", "cleanup_completed", "Planner cleaned up")
 
         except Exception as e:
             self.database.log_event("", "planner", "cleanup_error", f"Cleanup error: {str(e)}")

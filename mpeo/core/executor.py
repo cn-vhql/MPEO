@@ -539,7 +539,7 @@ class TaskExecutor:
 
         # Common tool keywords mapping
         tool_keywords = {
-            "current_time": ["时间", "time", "当前时间", "现在几点", "获取时间", "current time"],
+            "get_current_time": ["时间", "time", "当前时间", "现在几点", "获取时间", "current time"],
             "fetch": ["fetch", "get", "获取", "抓取", "retrieve"],
             "search": ["search", "查找", "搜索", "find"],
             "process": ["process", "处理", "handle"],
@@ -560,7 +560,7 @@ class TaskExecutor:
 
     async def _prepare_tool_arguments(self, tool_name: str, task: TaskNode,
                                    input_data: Dict[str, Any], user_query: str) -> Dict[str, Any]:
-        """Prepare arguments for MCP tool call based on tool requirements"""
+        """Prepare arguments for MCP tool call using LLM-based intelligent argument construction"""
 
         # Get tool schema from current MCP manager
         tool_schema = None
@@ -580,50 +580,250 @@ class TaskExecutor:
             self.database.log_event(None, "executor", "tool_schema_error",
                                    f"Failed to get schema for {tool_name}: {str(e)}")
 
-        # Prepare arguments based on tool schema
-        if tool_name == "fetch" and tool_schema:
-            arguments = {}
+        # If no schema available, return basic arguments
+        if not tool_schema:
+            return {
+                "task_id": task.task_id,
+                "task_desc": task.task_desc,
+                "expected_output": task.expected_output,
+                "input_data": input_data
+            }
 
-            # Extract URL from task description, user query, or input data
-            url = self._extract_url_from_context(task.task_desc, user_query, input_data)
-            if url:
-                arguments["url"] = url
-            else:
-                # Try to extract from the task description itself
-                url = self._extract_url_from_text(task.task_desc)
-                if url:
-                    arguments["url"] = url
+        # Use LLM to intelligently construct arguments based on tool schema and context
+        return await self._construct_arguments_with_llm(
+            tool_name, tool_schema, task, input_data, user_query
+        )
 
-            # Add optional parameters if defaults are available
-            if "properties" in tool_schema:
-                for param_name, param_info in tool_schema["properties"].items():
-                    if param_name not in arguments and "default" in param_info:
-                        arguments[param_name] = param_info["default"]
-
-            return arguments
-
-        # Special handling for time-related tools
-        if tool_name == "current_time":
-            arguments = {}
-            # Use default format based on tool schema
-            arguments["format"] = "YYYY-MM-DD HH:mm:ss"
-
-            # Check if timezone is mentioned
-            if "timezone" in task.task_desc.lower() or "时区" in task.task_desc:
-                # Try to extract timezone from task description
-                import re
-                timezone_match = re.search(r'(?:timezone|时区)[:\s]*([a-zA-Z_/\-+]+)', task.task_desc, re.IGNORECASE)
-                if timezone_match:
-                    arguments["timezone"] = timezone_match.group(1)
-            return arguments
-
-        # Default argument preparation for other tools
-        return {
-            "task_id": task.task_id,
-            "task_desc": task.task_desc,
+    async def _construct_arguments_with_llm(self, tool_name: str, tool_schema: Dict[str, Any],
+                                          task: TaskNode, input_data: Dict[str, Any], 
+                                          user_query: str) -> Dict[str, Any]:
+        """Use LLM to intelligently construct tool arguments based on schema and context"""
+        
+        # Prepare schema description for LLM
+        schema_description = self._format_schema_for_llm(tool_schema)
+        
+        # Prepare context information
+        context_info = {
+            "task_description": task.task_desc,
             "expected_output": task.expected_output,
+            "user_query": user_query,
             "input_data": input_data
         }
+        
+        # Construct prompt for LLM
+        prompt = f"""
+你是一个智能工具调用参数构造器。请根据以下信息为MCP工具构造合适的参数：
+
+工具名称: {tool_name}
+
+工具参数模式:
+{schema_description}
+
+任务上下文:
+- 任务描述: {context_info['task_description']}
+- 预期输出: {context_info['expected_output']}
+- 原始用户查询: {context_info['user_query']}
+- 输入数据: {json.dumps(context_info['input_data'], ensure_ascii=False, indent=2)}
+
+请根据工具的参数要求和任务上下文，构造合适的参数对象。要求：
+1. 严格遵循参数模式中定义的类型和格式
+2. 对于必需参数，必须提供值
+3. 对于可选参数，如果上下文中有相关信息则提供，否则使用默认值（如果有）
+4. 如果参数值可以从上下文中提取，请提取并使用
+5. 如果无法确定某个必需参数的值，请使用合理的默认值
+
+请直接返回JSON格式的参数对象，不要包含任何解释文字。
+"""
+
+        try:
+            # Call LLM to construct arguments
+            messages = [
+                {"role": "system", "content": "你是一个专业的工具参数构造器，能够根据工具模式和上下文信息构造准确的参数。"},
+                {"role": "user", "content": prompt}
+            ]
+
+            response = self.client.chat.completions.create(
+                model=self.model_config.model_name,
+                messages=messages,
+                temperature=0.1,  # Low temperature for consistent output
+                max_tokens=1000,
+                response_format={"type": "json_object"}
+            )
+
+            # Parse LLM response
+            llm_response = response.choices[0].message.content
+            if llm_response is None:
+                raise ValueError("LLM returned empty response")
+            arguments = json.loads(llm_response)
+            
+            # Validate and sanitize arguments
+            return self._validate_and_sanitize_arguments(arguments, tool_schema)
+            
+        except Exception as e:
+            self.database.log_event(None, "executor", "llm_argument_construction_failed",
+                                   f"Failed to construct arguments with LLM for {tool_name}: {str(e)}")
+            
+            # Fallback to basic argument construction
+            return self._fallback_argument_construction(tool_name, tool_schema, task, input_data)
+
+    def _format_schema_for_llm(self, tool_schema: Dict[str, Any]) -> str:
+        """Format tool schema for LLM understanding"""
+        schema_parts = []
+        
+        if "type" in tool_schema:
+            schema_parts.append(f"类型: {tool_schema['type']}")
+        
+        if "properties" in tool_schema:
+            schema_parts.append("参数:")
+            for param_name, param_info in tool_schema["properties"].items():
+                param_desc = f"  - {param_name}"
+                
+                if "type" in param_info:
+                    param_desc += f" ({param_info['type']})"
+                
+                if "description" in param_info:
+                    param_desc += f": {param_info['description']}"
+                
+                if param_name in tool_schema.get("required", []):
+                    param_desc += " [必需]"
+                else:
+                    param_desc += " [可选]"
+                
+                if "default" in param_info:
+                    param_desc += f" (默认值: {param_info['default']})"
+                
+                schema_parts.append(param_desc)
+        
+        if "required" in tool_schema:
+            schema_parts.append(f"必需参数: {', '.join(tool_schema['required'])}")
+        
+        return "\n".join(schema_parts)
+
+    def _validate_and_sanitize_arguments(self, arguments: Dict[str, Any], 
+                                       tool_schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and sanitize constructed arguments against schema"""
+        validated_args = {}
+        
+        # Get required parameters
+        required_params = tool_schema.get("required", [])
+        properties = tool_schema.get("properties", {})
+        
+        # Process each parameter in schema
+        for param_name, param_info in properties.items():
+            if param_name in arguments:
+                # Validate type and format
+                value = arguments[param_name]
+                if self._validate_parameter_value(value, param_info):
+                    validated_args[param_name] = value
+                else:
+                    # Try to fix common issues
+                    fixed_value = self._fix_parameter_value(value, param_info)
+                    if fixed_value is not None:
+                        validated_args[param_name] = fixed_value
+            elif param_name in required_params:
+                # Required parameter missing, try to provide default
+                if "default" in param_info:
+                    validated_args[param_name] = param_info["default"]
+                else:
+                    # Provide reasonable default based on type
+                    default_value = self._get_reasonable_default(param_info)
+                    if default_value is not None:
+                        validated_args[param_name] = default_value
+            elif "default" in param_info:
+                # Optional parameter with default
+                validated_args[param_name] = param_info["default"]
+        
+        return validated_args
+
+    def _validate_parameter_value(self, value: Any, param_info: Dict[str, Any]) -> bool:
+        """Validate a parameter value against its schema"""
+        param_type = param_info.get("type", "string")
+        
+        try:
+            if param_type == "string":
+                return isinstance(value, str)
+            elif param_type == "number":
+                return isinstance(value, (int, float))
+            elif param_type == "integer":
+                return isinstance(value, int)
+            elif param_type == "boolean":
+                return isinstance(value, bool)
+            elif param_type == "array":
+                return isinstance(value, list)
+            elif param_type == "object":
+                return isinstance(value, dict)
+            else:
+                return True  # Unknown type, assume valid
+        except:
+            return False
+
+    def _fix_parameter_value(self, value: Any, param_info: Dict[str, Any]) -> Any:
+        """Try to fix common parameter value issues"""
+        param_type = param_info.get("type", "string")
+        
+        try:
+            if param_type == "string" and not isinstance(value, str):
+                return str(value)
+            elif param_type == "number" and isinstance(value, str):
+                return float(value)
+            elif param_type == "integer" and isinstance(value, str):
+                return int(value)
+            elif param_type == "boolean" and isinstance(value, str):
+                return value.lower() in ("true", "1", "yes", "on")
+            else:
+                return None
+        except:
+            return None
+
+    def _get_reasonable_default(self, param_info: Dict[str, Any]) -> Any:
+        """Get reasonable default value for a parameter based on its type and description"""
+        param_type = param_info.get("type", "string")
+        param_name = param_info.get("name", "").lower()
+        description = param_info.get("description", "").lower()
+        
+        if param_type == "string":
+            if "timezone" in param_name or "timezone" in description:
+                return "UTC"
+            elif "format" in param_name or "format" in description:
+                return "YYYY-MM-DD HH:mm:ss"
+            elif "url" in param_name or "url" in description:
+                return ""
+            else:
+                return ""
+        elif param_type == "number":
+            return 0
+        elif param_type == "integer":
+            return 0
+        elif param_type == "boolean":
+            return False
+        elif param_type == "array":
+            return []
+        elif param_type == "object":
+            return {}
+        else:
+            return None
+
+    def _fallback_argument_construction(self, tool_name: str, tool_schema: Dict[str, Any],
+                                      task: TaskNode, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback argument construction when LLM fails"""
+        arguments = {}
+        properties = tool_schema.get("properties", {})
+        required_params = tool_schema.get("required", [])
+        
+        # Provide defaults for required parameters
+        for param_name in required_params:
+            if param_name in properties:
+                param_info = properties[param_name]
+                default_value = self._get_reasonable_default(param_info)
+                if default_value is not None:
+                    arguments[param_name] = default_value
+        
+        # Provide defaults for optional parameters with defaults
+        for param_name, param_info in properties.items():
+            if "default" in param_info and param_name not in arguments:
+                arguments[param_name] = param_info["default"]
+        
+        return arguments
 
     def _extract_url_from_context(self, task_desc: str, user_query: str, input_data: Dict[str, Any]) -> Optional[str]:
         """Extract URL from task description, user query, or input data"""

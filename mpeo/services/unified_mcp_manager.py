@@ -328,9 +328,32 @@ class StdioClient(MCPClientBase):
             return
 
         try:
-            await self.stack.aclose()
-            self._session = None
-            self._client = None
+            # 手动清理资源，避免stack.aclose()的cancel scope问题
+            if self._session:
+                try:
+                    # 尝试关闭会话
+                    if hasattr(self._session, 'close'):
+                        await self._session.close()
+                except:
+                    pass
+                self._session = None
+            
+            if self._client:
+                try:
+                    # 尝试关闭客户端
+                    if hasattr(self._client, 'close'):
+                        await self._client.close()
+                except:
+                    pass
+                self._client = None
+            
+            # 清理stack，但忽略cancel scope错误
+            try:
+                await self.stack.aclose()
+            except Exception as e:
+                if "cancel scope" not in str(e).lower():
+                    self.logger.error(f"Error closing stack: {e}")
+            
             self._is_connected = False
             self._cached_tools.clear()
             self.logger.info(f"STDIO client {self.name} closed")
@@ -707,11 +730,32 @@ class UnifiedMCPManager:
     async def close(self) -> None:
         """关闭服务管理器"""
         self.logger.info("Closing Unified MCP Service Manager")
-        await self.stack.aclose()
+        
+        # 逐个关闭客户端，避免cancel scope问题
+        for service_name, client in list(self.clients.items()):
+            try:
+                self.logger.debug(f"Closing client: {service_name}")
+                if hasattr(client, 'close'):
+                    # 直接调用close，不使用create_task避免cancel scope问题
+                    await client.close()
+                else:
+                    self.logger.warning(f"Client {service_name} does not have close method")
+            except Exception as e:
+                self.logger.error(f"Error closing client {service_name}: {e}")
+                # 继续关闭其他客户端，不因为一个失败而中断
+                continue
+        
+        # 清理资源 - 直接关闭堆栈，不使用create_task
+        try:
+            await self.stack.aclose()
+        except Exception as e:
+            self.logger.error(f"Error closing stack: {e}")
+        
         self.clients.clear()
         self.tool_registry._tools.clear()
         self.tool_registry._service_tools.clear()
         self._is_initialized = False
+        self.logger.info("Unified MCP Service Manager closed")
 
     async def _register_service_with_config(self, connection_config: MCPConnectionConfig) -> bool:
         """使用MCPConnectionConfig注册MCP服务"""

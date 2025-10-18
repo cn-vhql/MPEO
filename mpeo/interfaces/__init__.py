@@ -6,8 +6,7 @@ MPEO 用户界面模块
 - interactive: 交互式界面
 """
 
-from .cli import HumanFeedbackInterface
+# HumanFeedbackInterface 已移动到 core/cli.py
+# 为了向后兼容，这里提供一个空的导入
 
-__all__ = [
-    "HumanFeedbackInterface"
-]
+__all__ = []

@@ -1,5 +1,5 @@
 """
-System Coordinator - Orchestrates all components of the multi-model system
+重构后的SystemCoordinator - 使用依赖注入和事件系统
 """
 
 import asyncio
@@ -7,7 +7,7 @@ import uuid
 import os
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -19,287 +19,169 @@ from ..services.configuration_loader import get_config_loader
 from .planner import PlannerModel
 from .executor import TaskExecutor
 from .output import OutputModel
-from ..interfaces import HumanFeedbackInterface
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .cli import HumanFeedbackInterface
+from .container import DIContainer, LifetimeScope, get_container, singleton_service
+from .events import EventBus, get_event_bus, Event, TaskStartedEvent, TaskCompletedEvent, TaskFailedEvent
 
 
-class SystemCoordinator:
-    """Main system coordinator that orchestrates all components"""
+class ISystemCoordinator:
+    """系统协调器接口"""
+    
+    async def process_user_query(self, user_query: str) -> str:
+        """处理用户查询"""
+        return ""
+    
+    async def register_mcp_service(self, service_config: MCPServiceConfig) -> None:
+        """注册MCP服务"""
+        pass
+    
+    def get_system_status(self) -> Dict[str, Any]:
+        """获取系统状态"""
+        return {}
+    
+    async def cleanup(self):
+        """清理资源"""
+        pass
+
+
+@singleton_service(ISystemCoordinator)
+class SystemCoordinator(ISystemCoordinator):
+    """重构后的系统协调器 - 使用依赖注入和事件系统"""
+    
+    def __init__(
+        self,
+        container: DIContainer,
+        event_bus: EventBus,
+        database: DatabaseManager,
+        config: SystemConfig,
+        agent_config: MultiAgentConfig,
+        openai_clients: Dict[str, OpenAI],
+        mcp_manager: UnifiedMCPManager,
+        planner: PlannerModel,
+        executor: TaskExecutor,
+        output_model: OutputModel,
+        interface: Any  # 使用Any避免循环导入
+    ):
+        self.container = container
+        self.event_bus = event_bus
+        self.database = database
+        self.config = config
+        self.agent_config = agent_config
+        self.openai_clients = openai_clients
+        self.mcp_manager = mcp_manager
+        self.planner = planner
+        self.executor = executor
+        self.output_model = output_model
+        self.interface = interface
+        
+        self._mcp_manager_initialized = False
+        self._setup_logging()
+        self._setup_event_handlers()
+        
+        # 加载配置
+        self._load_configuration()
     
     def _setup_logging(self):
-        """Setup logging system with file and console output - only once"""
-        # Use the centralized logging utility
+        """设置日志系统"""
         from ..utils.logging import setup_logging
         from ..utils.paths import get_project_paths
 
-        # Ensure project structure exists
         project_paths = get_project_paths()
         project_paths.ensure_directories()
-
-        # Setup logging with ensured directory
         setup_logging(log_dir=str(project_paths.logs_dir))
-
-    def __init__(self, config: Optional[SystemConfig] = None,
-                 agent_config: Optional[MultiAgentConfig] = None,
-                 agent_config_path: Optional[str] = None,
-                 openai_client: Optional[OpenAI] = None,
-                 planner_config=None,
-                 executor_config=None,
-                 enable_agentscope: bool = False):
-        # Load environment variables, overriding existing ones
-        load_dotenv(override=True)
-
-        # Initialize configuration first
-        self.config = config or SystemConfig()
-        self.enable_agentscope = enable_agentscope
-
-        # Setup logging system only once, after config is available
-        self._setup_logging()
-
-        # Load agent configuration using unified configuration loader
-        config_loader = get_config_loader()
-        if agent_config:
-            self.agent_config = agent_config
-        elif agent_config_path:
-            self.agent_config = config_loader.load_agent_config(agent_config_path)
-        else:
-            # Try to load from default path, otherwise use default config
-            self.agent_config = config_loader.load_agent_config()
-
-        # Always read OPENAI_MODEL from environment and override if present
-        openai_model = os.getenv("OPENAI_MODEL")
-        if openai_model:
-            self.config.openai_model = openai_model
-            logging.debug(f"Overriding model from environment: {openai_model}")
-
-        # Use provided OpenAI client or initialize OpenAI clients
-        if openai_client:
-            self.openai_clients = {
-                'planner': openai_client,
-                'executor': openai_client,
-                'output': openai_client
-            }
-        else:
-            self.openai_clients = self._initialize_openai_clients()
-
-        # Initialize database
-        self.database = DatabaseManager(self.config.database_path)
-
-        # Initialize MCP service manager
-        self.mcp_manager = UnifiedMCPManager()
-
-        # Initialize components with support for AgentScope
-        if enable_agentscope:
-            # Try to use AgentScope components if available
-            try:
-                # Use unified planner with AgentScope support
-                self.planner = PlannerModel(
-                    openai_client=self.openai_clients['planner'],
-                    database=self.database,
-                    model_config=planner_config or self.agent_config.planner,
-                    enable_agentscope=True
-                )
-
-                # Try to use AgentScope executor if available
-                try:
-                    from .executor_agentscope import AgentScopeTaskExecutor
-                    self.executor = AgentScopeTaskExecutor(
-                        openai_client=self.openai_clients['executor'],
-                        database=self.database,
-                        config=self.config,
-                        model_config=executor_config or self.agent_config.executor,
-                        enable_agentscope=True
-                    )
-                except ImportError:
-                    # Fallback to legacy executor
-                    self.executor = TaskExecutor(
-                        self.openai_clients['executor'],
-                        self.database,
-                        self.config,
-                        self.agent_config.executor
-                    )
-                    logging.info("Using legacy executor with AgentScope planner")
-
-                logging.info("AgentScope components initialized successfully")
-
-            except Exception as e:
-                logging.warning(f"Failed to initialize AgentScope components, falling back to legacy: {str(e)}")
-                self.enable_agentscope = False
-                self._initialize_legacy_components()
-        else:
-            self._initialize_legacy_components()
-
-        # Initialize output model (always use legacy for now)
-        self.output_model = OutputModel(
-            self.openai_clients['output'],
-            self.database,
-            self.agent_config.output
+    
+    def _setup_event_handlers(self):
+        """设置事件处理器"""
+        # 订阅任务相关事件
+        self.event_bus.subscribe("TaskStartedEvent", self._on_task_started)
+        self.event_bus.subscribe("TaskCompletedEvent", self._on_task_completed)
+        self.event_bus.subscribe("TaskFailedEvent", self._on_task_failed)
+    
+    async def _on_task_started(self, event: TaskStartedEvent):
+        """任务开始事件处理"""
+        logging.info(f"Task started: {event.task_id} - {event.task_name}")
+        self.database.log_event(
+            event.task_id, 
+            "coordinator", 
+            "task_started", 
+            f"Task {event.task_name} started"
         )
-
-        self.interface = HumanFeedbackInterface(self.database)
-
-        # Load configuration from database
-        self._load_configuration()
-
-        # Note: MCP manager will be initialized when needed (lazy initialization)
-        self._mcp_manager_initialized = False
-
-    def _initialize_legacy_components(self):
-        """Initialize traditional components"""
-        self.planner = PlannerModel(
-            self.openai_clients['planner'],
-            self.database,
-            self.agent_config.planner
+    
+    async def _on_task_completed(self, event: TaskCompletedEvent):
+        """任务完成事件处理"""
+        logging.info(f"Task completed: {event.task_id} - {event.task_name} in {event.duration:.3f}s")
+        self.database.log_event(
+            event.task_id,
+            "coordinator", 
+            "task_completed", 
+            f"Task {event.task_name} completed in {event.duration:.3f}s"
         )
-        self.executor = TaskExecutor(
-            self.openai_clients['executor'],
-            self.database,
-            self.config,
-            self.agent_config.executor
+    
+    async def _on_task_failed(self, event: TaskFailedEvent):
+        """任务失败事件处理"""
+        logging.error(f"Task failed: {event.task_id} - {event.task_name} - {event.error}")
+        self.database.log_event(
+            event.task_id,
+            "coordinator", 
+            "task_failed", 
+            f"Task {event.task_name} failed: {event.error}"
         )
-
-    async def set_mcp_manager(self, mcp_manager):
-        """Set MCP manager and update components"""
-        self.mcp_manager = mcp_manager
-        await self._ensure_mcp_manager_initialized()
-
+    
     async def cleanup(self):
-        """Cleanup resources"""
+        """清理资源"""
         if hasattr(self, 'mcp_manager') and self.mcp_manager:
             await self.mcp_manager.close()
             self._mcp_manager_initialized = False
-
+    
     async def _ensure_mcp_manager_initialized(self):
-        """Ensure MCP manager is initialized (lazy initialization)"""
+        """确保MCP管理器已初始化"""
         if not self._mcp_manager_initialized:
             await self._initialize_mcp_manager()
             self._mcp_manager_initialized = True
-
+    
     async def _initialize_mcp_manager(self):
-        """Initialize MCP manager and update components"""
+        """初始化MCP管理器"""
         await self.mcp_manager.initialize()
-
-        # Share MCP manager with planner and executor
+        
+        # 与组件共享MCP管理器
         await self.planner.set_mcp_manager(self.mcp_manager)
         self.executor.mcp_manager = self.mcp_manager
-
-        # Load MCP services from database
+        
+        # 从数据库加载MCP服务
         await self._load_mcp_services_from_database()
-
-        # Load MCP services from configuration file
+        
+        # 从配置文件加载MCP服务
         await self._load_mcp_services_from_config()
-
+        
         logging.info("MCP manager initialized and shared with components")
-
+    
     async def _load_mcp_services_from_database(self):
-        """Load MCP services from database and register with manager"""
+        """从数据库加载MCP服务"""
         try:
             mcp_services = self.database.load_config("mcp_services", {})
             for service_name, service_config in mcp_services.items():
                 try:
                     mcp_config = MCPServiceConfig.parse_obj(service_config)
-                    await self.mcp_manager.register_from_service_config(mcp_config)
+                    await self.mcp_manager.register_service(mcp_config)
                     logging.info(f"MCP service '{service_name}' loaded from database")
                 except Exception as e:
                     logging.error(f"Failed to load MCP service '{service_name}' from database: {str(e)}")
         except Exception as e:
             logging.error(f"Failed to load MCP services from database: {str(e)}")
-
-    def _create_openai_client(self, agent_name: str, agent_config) -> OpenAI:
-        """创建单个 OpenAI 客户端的工厂方法"""
-        # 获取OpenAI配置
-        openai_config = agent_config.openai_config or OpenAIApiConfig()
-
-        # 如果没有配置API密钥，尝试从环境变量获取
-        if not openai_config.api_key:
-            global_api_key = os.getenv("OPENAI_API_KEY")
-            if not global_api_key:
-                raise ValueError(f"OPENAI_API_KEY environment variable is required for {agent_name}")
-            openai_config.api_key = global_api_key
-
-        # 获取基础URL
-        if not openai_config.base_url:
-            global_base_url = os.getenv("OPENAI_API_BASE")
-            if global_base_url:
-                openai_config.base_url = global_base_url
-
-        # 获取组织ID
-        if not openai_config.organization:
-            global_organization = os.getenv("OPENAI_ORGANIZATION")
-            if global_organization:
-                openai_config.organization = global_organization
-
-        # 创建客户端
-        try:
-            client_kwargs = {
-                'api_key': openai_config.api_key,
-                'timeout': openai_config.timeout or 60,
-                'max_retries': openai_config.max_retries or 3
-            }
-
-            if openai_config.base_url:
-                client_kwargs['base_url'] = openai_config.base_url
-
-            if openai_config.organization:
-                client_kwargs['organization'] = openai_config.organization
-
-            client = OpenAI(**client_kwargs)
-
-            logging.debug(f"{agent_name} OpenAI client initialized successfully")
-            logging.debug(f"  Base URL: {openai_config.base_url or 'Default'}")
-            logging.debug(f"  Model: {agent_config.model_name}")
-
-            return client
-
-        except Exception as e:
-            logging.error(f"Failed to initialize {agent_name} OpenAI client: {str(e)}")
-            raise
-
-    def _initialize_openai_clients(self) -> Dict[str, OpenAI]:
-        """为每个智能体初始化独立的OpenAI客户端"""
-        clients = {}
-        agent_names = ['planner', 'executor', 'output']
-
-        for agent_name in agent_names:
-            agent_config = getattr(self.agent_config, agent_name)
-            clients[agent_name] = self._create_openai_client(agent_name, agent_config)
-
-        return clients
-    
-    def _load_configuration(self):
-        """Load system configuration from database and config files"""
-        # MCP services are now loaded in _initialize_mcp_manager
-        pass
     
     async def _load_mcp_services_from_config(self):
-        """Load MCP services from configuration file - delegated to unified manager"""
-        # The unified MCP manager now handles configuration loading automatically
+        """从配置文件加载MCP服务"""
         logging.info("MCP services configuration loading delegated to UnifiedMCPManager")
     
-    def _update_planner_mcp_services(self):
-        """Update planner with available MCP services"""
-        try:
-            # Get list of available MCP service names
-            mcp_service_names = list(self.executor.mcp_services.keys())
-            
-            # Update planner with available services
-            self.planner.update_mcp_services(mcp_service_names)
-            
-            logging.info(f"Updated planner with MCP services: {mcp_service_names}")
-            
-        except Exception as e:
-            logging.error(f"Failed to update planner with MCP services: {str(e)}")
+    def _load_configuration(self):
+        """加载系统配置"""
+        pass
     
     async def process_user_query(self, user_query: str) -> str:
-        """
-        Process a user query through the complete pipeline
-        
-        Args:
-            user_query: User's original query/question
-            
-        Returns:
-            str: Final answer
-        """
-        # Create session
+        """处理用户查询"""
+        # 创建会话
         session_id = str(uuid.uuid4())
         session = TaskSession(
             session_id=session_id,
@@ -310,10 +192,16 @@ class SystemCoordinator:
         self.database.log_event(session_id, "coordinator", "session_started", f"Query: {user_query[:100]}...")
 
         try:
-            # Ensure MCP manager is initialized
+            # 确保MCP管理器已初始化
             await self._ensure_mcp_manager_initialized()
 
-            # Step 1: Planning Phase
+            # 发布查询开始事件
+            await self.event_bus.publish(Event(
+                data={"session_id": session_id, "query": user_query},
+                event_type="QueryProcessingStarted"
+            ))
+
+            # 阶段1: 规划阶段
             self.database.log_event(session_id, "coordinator", "planning_phase_started")
             task_graph = await self._planning_phase(user_query, session_id)
             if not task_graph:
@@ -323,7 +211,7 @@ class SystemCoordinator:
             session.status = "planned"
             self.database.save_session(session)
             
-            # Step 2: Human Feedback Phase
+            # 阶段2: 人工反馈阶段
             self.database.log_event(session_id, "coordinator", "feedback_phase_started")
             confirmed, final_graph = await self._feedback_phase(task_graph, user_query, session_id)
             if not confirmed:
@@ -335,25 +223,35 @@ class SystemCoordinator:
             session.status = "confirmed"
             self.database.save_session(session)
             
-            # Save final task graph
-            self.database.save_task_graph(session_id, final_graph, is_final=True)
+            # 保存最终任务图
+            if final_graph:
+                self.database.save_task_graph(session_id, final_graph, is_final=True)
             
-            # Step 3: Execution Phase
+            # 阶段3: 执行阶段
             self.database.log_event(session_id, "coordinator", "execution_phase_started")
-            execution_results = await self._execution_phase(final_graph, user_query, session_id)
+            if final_graph:
+                execution_results = await self._execution_phase(final_graph, user_query, session_id)
+            else:
+                execution_results = ExecutionResults()
             session.execution_results = execution_results
             session.status = "executed"
             self.database.save_session(session)
             
-            # Step 4: Output Generation Phase
+            # 阶段4: 输出生成阶段
             self.database.log_event(session_id, "coordinator", "output_phase_started")
-            final_output = self._output_phase(execution_results, user_query, final_graph, session_id)
+            final_output = self._output_phase(execution_results, user_query, final_graph or task_graph, session_id)
             session.final_output = final_output
             session.status = "completed"
             self.database.save_session(session)
             
-            # Display execution results
+            # 显示执行结果
             self.interface.display_execution_results(execution_results, session_id)
+            
+            # 发布查询完成事件
+            await self.event_bus.publish(Event(
+                data={"session_id": session_id, "query": user_query, "result": final_output},
+                event_type="QueryProcessingCompleted"
+            ))
             
             self.database.log_event(session_id, "coordinator", "session_completed", "All phases completed successfully")
             
@@ -365,23 +263,24 @@ class SystemCoordinator:
             session.status = "error"
             session.final_output = error_msg
             self.database.save_session(session)
+            
+            # 发布查询失败事件
+            await self.event_bus.publish(Event(
+                data={"session_id": session_id, "query": user_query, "error": error_msg},
+                event_type="QueryProcessingFailed"
+            ))
+            
             return error_msg
     
     async def _planning_phase(self, user_query: str, session_id: str) -> Optional[TaskGraph]:
-        """Execute the planning phase"""
+        """规划阶段"""
         try:
-            logging.debug(f"Coordinator - Starting planning phase for query: {user_query}")
-            logging.debug(f"Coordinator - Session ID: {session_id}")
+            logging.debug(f"Starting planning phase for query: {user_query}")
             
-            # Generate task graph using planner model
-            logging.debug(f"Coordinator - Calling planner.analyze_and_decompose...")
             task_graph = await self.planner.analyze_and_decompose(user_query, session_id)
             
-            logging.debug(f"Coordinator - Task graph generated successfully")
-            logging.debug(f"Coordinator - Number of tasks: {len(task_graph.nodes)}")
-            logging.debug(f"Coordinator - Number of dependencies: {len(task_graph.edges)}")
+            logging.debug(f"Task graph generated successfully with {len(task_graph.nodes)} tasks")
             
-            # Save initial task graph
             self.database.save_task_graph(session_id, task_graph, is_final=False)
             
             self.database.log_event(session_id, "coordinator", "planning_completed", 
@@ -390,21 +289,18 @@ class SystemCoordinator:
             return task_graph
             
         except Exception as e:
-            logging.error(f"Coordinator - Planning phase failed: {str(e)}")
-            logging.error(f"Coordinator - Exception type: {type(e).__name__}")
-            import traceback
-            logging.error(f"Coordinator - Traceback: {traceback.format_exc()}")
+            logging.error(f"Planning phase failed: {str(e)}")
             self.database.log_event(session_id, "coordinator", "planning_error", f"Planning failed: {str(e)}")
             return None
     
     async def _feedback_phase(self, task_graph: TaskGraph, user_query: str, session_id: str) -> tuple[bool, Optional[TaskGraph]]:
-        """Execute the human feedback phase"""
+        """人工反馈阶段"""
         try:
-            # Present task graph to user for confirmation/modification
-            confirmed, modified_graph = self.interface.present_task_graph(task_graph, user_query, session_id, self.mcp_manager)
+            confirmed, modified_graph = await self.interface.present_task_graph(
+                task_graph, user_query, session_id, self.mcp_manager
+            )
             
             if confirmed and modified_graph:
-                # Save modified task graph
                 self.database.save_task_graph(session_id, modified_graph, is_final=False)
                 self.database.log_event(session_id, "coordinator", "feedback_completed", "User confirmed DAG")
                 return True, modified_graph
@@ -417,9 +313,8 @@ class SystemCoordinator:
             return False, None
     
     async def _execution_phase(self, task_graph: TaskGraph, user_query: str, session_id: str) -> ExecutionResults:
-        """Execute the execution phase"""
+        """执行阶段"""
         try:
-            # Execute all tasks in the graph
             execution_results = await self.executor.execute_task_graph(task_graph, user_query, session_id)
             
             self.database.log_event(session_id, "coordinator", "execution_completed", 
@@ -429,14 +324,12 @@ class SystemCoordinator:
             
         except Exception as e:
             self.database.log_event(session_id, "coordinator", "execution_error", f"Execution failed: {str(e)}")
-            # Return empty results on error
             return ExecutionResults()
     
     def _output_phase(self, execution_results: ExecutionResults, user_query: str, 
                      task_graph: TaskGraph, session_id: str) -> str:
-        """Execute the output generation phase"""
+        """输出生成阶段"""
         try:
-            # Generate final integrated output
             final_output = self.output_model.generate_final_output(
                 execution_results, user_query, task_graph, session_id
             )
@@ -449,64 +342,28 @@ class SystemCoordinator:
             self.database.log_event(session_id, "coordinator", "output_error", f"Output generation failed: {str(e)}")
             return f"生成最终输出时发生错误: {str(e)}"
     
-    def _display_final_output(self, final_output: str):
-        """Display the final output to user"""
-        from rich.console import Console
-        from rich.panel import Panel
-        
-        console = Console()
-        console.print("\n")
-        console.print(Panel.fit(
-            final_output,
-            title="🎯 最终答案",
-            border_style="green"
-        ))
-        console.print("\n")
-    
     async def register_mcp_service(self, service_config: MCPServiceConfig):
-        """Register an MCP service with the system"""
-        # Ensure MCP manager is initialized
+        """注册MCP服务"""
         await self._ensure_mcp_manager_initialized()
-
-        # Register with MCP manager
+        
         await self.mcp_manager.register_service(service_config)
-
-        # Save to configuration file
+        
         config_loader = get_config_loader()
         config_loader.add_mcp_service(service_config)
-
-        # Refresh planner's MCP tools with force refresh since services changed
+        
         await self.planner.refresh_mcp_tools(force_refresh=True)
-    
-    def get_session_history(self, limit: int = 50) -> list[TaskSession]:
-        """Get session history"""
-        return self.database.list_sessions(limit=limit)
-    
-    def get_session_details(self, session_id: str) -> Optional[TaskSession]:
-        """Get detailed session information"""
-        return self.database.load_session(session_id)
-    
-    def get_system_logs(self, limit: int = 100) -> list[Dict[str, Any]]:
-        """Get system logs"""
-        return self.database.get_logs(limit=limit)
-    
-    def get_session_logs(self, session_id: str, limit: int = 100) -> list[Dict[str, Any]]:
-        """Get logs for a specific session"""
-        return self.database.get_logs(session_id, limit)
-    
-    def update_config(self, **kwargs):
-        """Update system configuration"""
-        for key, value in kwargs.items():
-            if hasattr(self.config, key):
-                setattr(self.config, key, value)
-                self.database.save_config(key, value)
+        
+        # 发布服务注册事件
+        await self.event_bus.publish(Event(
+            data={"service_name": getattr(service_config, 'service_name', 'unknown'), "service_type": getattr(service_config, 'connection_type', 'unknown')},
+            event_type="MCPServiceRegistered"
+        ))
     
     def get_system_status(self) -> Dict[str, Any]:
-        """Get system status information"""
+        """获取系统状态"""
         recent_sessions = self.database.list_sessions(limit=10)
         recent_logs = self.database.get_logs(limit=20)
         
-        # Calculate statistics
         total_sessions = len(self.database.list_sessions(limit=1000))
         recent_success_rate = 0
         if recent_sessions:
@@ -531,106 +388,161 @@ class SystemCoordinator:
         }
 
 
-class CLIInterface:
-    """Command Line Interface for the system"""
-
-    def __init__(self):
-        self.coordinator = None
-        from rich.console import Console
-        from rich.panel import Panel
-        self.console = Console()
-
-        # Initialize command registry
-        from ..interfaces.command_handlers import CommandRegistry
-        self.command_registry = CommandRegistry(self.console)
-
-    def initialize(self, config: Optional[SystemConfig] = None,
-                 openai_client: Optional[OpenAI] = None,
-                 planner_config=None,
-                 executor_config=None,
-                 enable_agentscope: bool = False):
-        """Initialize the system coordinator with AgentScope support"""
+class SystemCoordinatorFactory:
+    """系统协调器工厂"""
+    
+    @staticmethod
+    def create_coordinator(
+        config: Optional[SystemConfig] = None,
+        agent_config: Optional[MultiAgentConfig] = None,
+        agent_config_path: Optional[str] = None,
+        openai_client: Optional[OpenAI] = None
+    ) -> SystemCoordinator:
+        """创建系统协调器实例"""
+        
+        # 加载环境变量
+        load_dotenv(override=True)
+        
+        # 获取容器和事件总线
+        container = get_container()
+        event_bus = get_event_bus()
+        
+        # 初始化配置
+        config = config or SystemConfig()
+        
+        # 加载代理配置
+        config_loader = get_config_loader()
+        if agent_config:
+            final_agent_config = agent_config
+        elif agent_config_path:
+            final_agent_config = config_loader.load_agent_config(agent_config_path)
+        else:
+            final_agent_config = config_loader.load_agent_config()
+        
+        # 从环境变量覆盖模型
+        openai_model = os.getenv("OPENAI_MODEL")
+        if openai_model:
+            config.openai_model = openai_model
+        
+        # 创建OpenAI客户端
+        if openai_client:
+            openai_clients = {
+                'planner': openai_client,
+                'executor': openai_client,
+                'output': openai_client
+            }
+        else:
+            openai_clients = SystemCoordinatorFactory._create_openai_clients(final_agent_config)
+        
+        # 初始化数据库
+        database = DatabaseManager(config.database_path)
+        
+        # 初始化MCP管理器
+        mcp_manager = UnifiedMCPManager()
+        
+        # 初始化传统组件
+        planner = PlannerModel(
+            openai_clients['planner'],
+            database,
+            final_agent_config.planner
+        )
+        
+        executor = TaskExecutor(
+            openai_clients['executor'],
+            database,
+            config,
+            final_agent_config.executor
+        )
+        
+        output_model = OutputModel(
+            openai_clients['output'],
+            database,
+            final_agent_config.output
+        )
+        
+        # 延迟导入避免循环依赖
+        from .cli import HumanFeedbackInterface
+        interface = HumanFeedbackInterface(database)
+        
+        # 注册服务到容器
+        container.register_singleton(DatabaseManager, instance=database)
+        container.register_singleton(UnifiedMCPManager, instance=mcp_manager)
+        container.register_singleton(PlannerModel, instance=planner)
+        container.register_singleton(TaskExecutor, instance=executor)
+        container.register_singleton(OutputModel, instance=output_model)
+        container.register_singleton(HumanFeedbackInterface, instance=interface)
+        container.register_singleton(SystemConfig, instance=config)
+        container.register_singleton(MultiAgentConfig, instance=final_agent_config)
+        
+        # 创建协调器
+        coordinator = SystemCoordinator(
+            container=container,
+            event_bus=event_bus,
+            database=database,
+            config=config,
+            agent_config=final_agent_config,
+            openai_clients=openai_clients,
+            mcp_manager=mcp_manager,
+            planner=planner,
+            executor=executor,
+            output_model=output_model,
+            interface=interface
+        )
+        
+        return coordinator
+    
+    @staticmethod
+    def _create_openai_clients(agent_config: MultiAgentConfig) -> Dict[str, OpenAI]:
+        """创建OpenAI客户端"""
+        clients = {}
+        agent_names = ['planner', 'executor', 'output']
+        
+        for agent_name in agent_names:
+            agent_model_config = getattr(agent_config, agent_name)
+            clients[agent_name] = SystemCoordinatorFactory._create_openai_client(agent_name, agent_model_config)
+        
+        return clients
+    
+    @staticmethod
+    def _create_openai_client(agent_name: str, agent_config) -> OpenAI:
+        """创建单个OpenAI客户端"""
+        openai_config = agent_config.openai_config or OpenAIApiConfig()
+        
+        if not openai_config.api_key:
+            global_api_key = os.getenv("OPENAI_API_KEY")
+            if not global_api_key:
+                raise ValueError(f"OPENAI_API_KEY environment variable is required for {agent_name}")
+            openai_config.api_key = global_api_key
+        
+        if not openai_config.base_url:
+            global_base_url = os.getenv("OPENAI_API_BASE")
+            if global_base_url:
+                openai_config.base_url = global_base_url
+        
+        if not openai_config.organization:
+            global_organization = os.getenv("OPENAI_ORGANIZATION")
+            if global_organization:
+                openai_config.organization = global_organization
+        
         try:
-            self.coordinator = SystemCoordinator(
-                config=config,
-                openai_client=openai_client,
-                planner_config=planner_config,
-                executor_config=executor_config,
-                enable_agentscope=enable_agentscope
-            )
-
-            if enable_agentscope and self.coordinator.enable_agentscope:
-                self.console.print("[green]✓ 系统初始化成功 (AgentScope模式)[/green]")
-            else:
-                self.console.print("[green]✓ 系统初始化成功 (传统模式)[/green]")
-            return True
+            client_kwargs = {
+                'api_key': openai_config.api_key,
+                'timeout': openai_config.timeout or 60,
+                'max_retries': openai_config.max_retries or 3
+            }
+            
+            if openai_config.base_url:
+                client_kwargs['base_url'] = openai_config.base_url
+            
+            if openai_config.organization:
+                client_kwargs['organization'] = openai_config.organization
+            
+            client = OpenAI(**client_kwargs)
+            
+            logging.debug(f"{agent_name} OpenAI client initialized successfully")
+            
+            return client
+            
         except Exception as e:
-            self.console.print(f"[red]✗ 系统初始化失败: {str(e)}[/red]")
-            return False
-
-    async def run_interactive_mode(self):
-        """Run interactive CLI mode"""
-        if not self.coordinator:
-            self.console.print("[red]系统未初始化[/red]")
-            return
-
-        try:
-            from rich.panel import Panel
-            self.console.print(Panel.fit(
-                "[bold blue]多模型协作任务处理系统[/bold blue]\n"
-                "[green]交互模式已启动[/green]\n"
-                "输入 'help' 查看可用命令，输入 'quit' 退出",
-                title="系统状态"
-            ))
-
-            while True:
-                try:
-                    user_input = self.console.input("\n[bold cyan]请输入您的问题或命令:[/bold cyan] ").strip()
-
-                    if not user_input:
-                        continue
-
-                    # Prepare context for command handlers
-                    context = {"coordinator": self.coordinator}
-
-                    # Try to handle as command
-                    result = await self.command_registry.handle_command(user_input, context)
-
-                    # Check if quit signal was received
-                    if result is True:
-                        break
-
-                    # If command was handled, continue loop
-                    if result is not None:
-                        continue
-
-                    # Treat as user query
-                    self.console.print(f"\n[bold]正在处理: {user_input}[/bold]")
-                    query_result = await self.coordinator.process_user_query(user_input)
-
-                    # Display the result to the user
-                    if query_result:
-                        self.console.print(f"\n[bold green]处理结果:[/bold green]")
-                        self.console.print(query_result)
-
-                except KeyboardInterrupt:
-                    self.console.print("\n[yellow]操作已中断[/yellow]")
-                    # 确保清理资源
-                    try:
-                        await self.coordinator.cleanup()
-                    except:
-                        pass
-                except Exception as e:
-                    self.console.print(f"\n[red]处理错误: {str(e)}[/red]")
-                    # 确保清理资源
-                    try:
-                        await self.coordinator.cleanup()
-                    except:
-                        pass
-        finally:
-            # 最终清理
-            if self.coordinator:
-                try:
-                    await self.coordinator.cleanup()
-                except:
-                    pass
+            logging.error(f"Failed to initialize {agent_name} OpenAI client: {str(e)}")
+            raise
