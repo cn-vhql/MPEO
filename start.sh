@@ -6,6 +6,7 @@
 echo "🚀 启动 MPEO 系统..."
 
 # 设置 ModelScope API 配置（覆盖系统环境变量）
+# 请将以下密钥替换为您自己的真实 API 密钥
 export OPENAI_API_KEY="your-modelscope-api-key-here"
 export OPENAI_API_BASE="https://api-inference.modelscope.cn/v1"
 
