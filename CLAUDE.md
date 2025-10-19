@@ -52,6 +52,9 @@ uv pip install -e .
 # Copy environment configuration
 cp .env.example .env
 # Edit .env to add your OPENAI_API_KEY and other settings
+
+# Verify installation (if test_system.py exists)
+python test_system.py
 ```
 
 ### Running the System
@@ -79,6 +82,9 @@ python main.py --config config/custom.json --max-parallel 8 --model gpt-4
 
 # To reset database (WARNING: deletes all data)
 rm data/databases/mpeo.db
+
+# Check database status from CLI
+status  # Shows database connection and basic stats
 ```
 
 ### Configuration
@@ -97,9 +103,39 @@ rm data/databases/mpeo.db
 
 # To add new dependencies, update pyproject.toml and reinstall:
 pip install -e .
+
+# Development installation (recommended):
+pip install -e .
+
+# Using uv (faster package manager):
+uv pip install -e .
 ```
 
 ## Key Technical Patterns
+
+### System Workflow (4-Phase Pipeline)
+The system follows a consistent 4-phase workflow for all user queries:
+
+1. **Planning Phase**:
+   - User query analyzed by Planner Model
+   - Tasks decomposed into DAG structure using AI
+   - Dependencies and priorities automatically assigned
+
+2. **Human Feedback Phase**:
+   - Task graph displayed interactively via CLI
+   - User can approve, modify, add, or remove tasks
+   - DAG validation ensures no circular dependencies
+
+3. **Execution Phase**:
+   - TaskExecutor schedules tasks based on dependencies
+   - Parallel execution of independent tasks
+   - MCP services called for external operations
+   - Automatic retry on failures
+
+4. **Output Phase**:
+   - OutputModel integrates all execution results
+   - Conflict resolution for competing results
+   - Final formatting and presentation to user
 
 ### Data Flow
 1. User query → Planner (task decomposition)
@@ -142,6 +178,8 @@ During system execution, these commands are available:
 - **Logging**: Centralized logging system with daily rotation and structured log formats
 - **MCP Integration**: Full Model Context Protocol support with multiple service types
 - **Agent Configuration**: Per-agent model configuration supporting different OpenAI models for different roles
+- **Event System**: Event-driven architecture with EventBus for loose coupling between components
+- **NetworkX Integration**: DAG-based task scheduling with cycle detection and dependency management
 
 ## File Structure Best Practices
 
@@ -171,6 +209,13 @@ from mpeo.services.unified_mcp_manager import UnifiedMCPManager
 
 # Avoid - Deep imports unless necessary
 from mpeo.core.coordinator import SomeInternalClass  # Prefer package-level imports
+
+# Key classes to know:
+# - SystemCoordinator: Main orchestrator
+# - TaskNode/TaskGraph: Core data structures
+# - UnifiedMCPManager: External service integration
+# - DatabaseManager: Persistence layer
+# - EventBus: Event system for loose coupling
 ```
 
 ## Common Development Patterns
@@ -185,6 +230,9 @@ from mpeo.core.coordinator import SomeInternalClass  # Prefer package-level impo
 - Use `TaskNode` for individual tasks with dependency definitions
 - Executor handles parallel/serial scheduling based on dependencies
 - All task results are stored in SQLite for audit and debugging
+- Task types: LOCAL_COMPUTE, MCP_CALL, DATA_PROCESSING
+- Dependency types: DATA_DEPENDENCY, RESULT_DEPENDENCY
+- Always validate DAG acyclicity before execution (built-in validation)
 
 ### Configuration Management
 - Environment variables in `.env` provide base configuration
@@ -197,3 +245,27 @@ from mpeo.core.coordinator import SomeInternalClass  # Prefer package-level impo
 - All operations are logged with context and timestamps
 - Database operations use transactions with automatic rollback on errors
 - MCP service failures trigger automatic retries with exponential backoff
+
+### Important Development Notes
+- **ModelScope API Integration**: The system is configured to use ModelScope API by default (not OpenAI)
+- **Environment Configuration**: Supports both global and per-agent API configurations
+- **Event-Driven Architecture**: Use EventBus for loose coupling between components
+- **Dependency Injection**: Services are managed through a DI container in SystemCoordinator
+- **No Formal Test Suite**: Test functionality through interactive use and simple queries
+
+### Testing and Development
+```bash
+# No formal test suite currently exists
+# Test system functionality by running the main application:
+python main.py
+
+# Test basic functionality with simple queries:
+# - "当前时间" (test time MCP service)
+# - "请抓取 https://example.com" (test fetch MCP service)
+# - System will show task graph for approval before execution
+
+# Debug system issues:
+# - Use "logs" command to view system logs
+# - Use "status" command to check system health
+# - Check config files in config/ directory
+```

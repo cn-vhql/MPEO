@@ -264,3 +264,6 @@ development/
 # poetry.lock
 # Pipfile.lock
 config/mcp_services.json
+config/agent_models.json
+CLAUDE.md
+config/agent_models.json
