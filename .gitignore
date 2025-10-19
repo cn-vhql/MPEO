@@ -216,6 +216,20 @@ data/logs/*/
 config/secrets.json
 config/local_*.json
 
+# API Key protection - prevent files with real API keys from being committed
+**/real_keys.env
+**/production.env
+**/secrets.env
+**/.env.production
+**/.env.staging
+**/*_real.py
+**/*_prod.json
+
+# Files that contain patterns similar to API keys (block them)
+**/*api_key*real*
+**/*apikey*real*
+**/*token*real*
+
 # Temporary and development files
 *.tmp
 *.temp
@@ -263,7 +277,6 @@ development/
 # uv.lock
 # poetry.lock
 # Pipfile.lock
-config/mcp_services.json
-config/agent_models.json
-CLAUDE.md
-config/agent_models.json
+
+# Note: config/agent_models.json and config/mcp_services.json are tracked in version control
+# but should only contain placeholder values, not real API keys
