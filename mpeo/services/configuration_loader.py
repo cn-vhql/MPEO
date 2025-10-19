@@ -251,7 +251,7 @@ class ConfigurationLoader:
             if not agent.openai_config:
                 agent.openai_config = OpenAIApiConfig()
 
-            # 只有当配置为空时才使用环境变量
+            # 配置API密钥 - 使用通用的OpenAI接口规范
             if not agent.openai_config.api_key:
                 # 先尝试智能体特定的环境变量
                 agent_specific_key = os.getenv(f"OPENAI_API_KEY_{agent_name.upper()}")
@@ -263,6 +263,7 @@ class ConfigurationLoader:
                     if global_api_key:
                         agent.openai_config.api_key = global_api_key
 
+            # 配置API基础URL
             if not agent.openai_config.base_url:
                 # 先尝试智能体特定的环境变量
                 agent_specific_base = os.getenv(f"OPENAI_API_BASE_{agent_name.upper()}")
@@ -274,6 +275,7 @@ class ConfigurationLoader:
                     if global_base_url:
                         agent.openai_config.base_url = global_base_url
 
+            # 配置OpenAI组织ID
             if not agent.openai_config.organization:
                 # 先尝试智能体特定的环境变量
                 agent_specific_org = os.getenv(f"OPENAI_ORGANIZATION_{agent_name.upper()}")

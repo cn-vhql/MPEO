@@ -16,6 +16,15 @@ class OpenAIApiConfig(BaseModel):
     custom_headers: Optional[Dict[str, str]] = Field(default=None, description="自定义请求头")
 
 
+class ModelScopeApiConfig(BaseModel):
+    """ModelScope API配置"""
+    api_key: Optional[str] = Field(default=None, description="ModelScope API密钥")
+    base_url: Optional[str] = Field(default="https://dashscope.aliyuncs.com/api/v1", description="ModelScope API基础URL")
+    timeout: Optional[int] = Field(default=60, ge=1, description="请求超时时间（秒）")
+    max_retries: Optional[int] = Field(default=3, ge=0, description="最大重试次数")
+    custom_headers: Optional[Dict[str, str]] = Field(default=None, description="自定义请求头")
+
+
 class AgentModelConfig(BaseModel):
     """单个智能体的模型配置"""
     model_name: str = Field(..., description="模型名称")
@@ -33,6 +42,9 @@ class AgentModelConfig(BaseModel):
 
     # OpenAI API配置
     openai_config: Optional[OpenAIApiConfig] = Field(default=None, description="OpenAI API配置")
+    
+    # ModelScope API配置
+    modelscope_config: Optional[ModelScopeApiConfig] = Field(default=None, description="ModelScope API配置")
 
     # 向后兼容的配置
     custom_headers: Optional[Dict[str, str]] = Field(default=None, description="自定义请求头（已废弃，使用openai_config.custom_headers）")

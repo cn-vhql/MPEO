@@ -964,6 +964,8 @@ class UnifiedMCPManager:
             "HTTP 502",  # 网关错误
             "HTTP 503",  # 服务不可用
             "HTTP 504",  # 网关超时
+            "Reached maximum retries",  # 重试次数用尽
+            "request failed",  # 请求失败
         ]
 
         return any(error in error_str for error in retryable_errors)
